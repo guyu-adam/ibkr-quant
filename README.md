@@ -57,17 +57,27 @@ Monthly rebalancing of a diversified long-term portfolio: QQQ 25%, SPY 20%, NVDA
 
 ## 回测结果 / Backtest Results
 
-> 数据来源：yfinance 历史数据，2022-01-01 ~ 2024-12-31，初始资金 $10,000
+### US Momentum — 5分钟 K 线实测（最近30个交易日，yfinance数据）
 
-| 策略 / Strategy | 年化收益 / Ann. Return | 最大回撤 / Max DD | 夏普比率 / Sharpe |
-|---|---|---|---|
-| US Momentum | ~18.4% | -12.3% | 1.42 |
-| Timezone Arbitrage | ~11.2% | -7.8% | 1.18 |
-| HK IPO Pop | ~23.6% | -9.1% | 1.87 |
-| Long-term Portfolio | ~14.1% | -16.2% | 0.98 |
-| **组合 / Combined** | **~19.8%** | **-11.4%** | **1.61** |
+> 在 RTX 5060 Ti Linux 机器上运行，$10,000 起始资金，RSI(14) + EMA(10/30) 过滤
 
-*注：历史回测不代表未来收益。默认启用模拟交易模式（PAPER_TRADE=True）。*  
+| 标的 | 30日收益 | 同期Buy&Hold | 交易次数 | 胜率 | 最终权益 |
+|---|---|---|---|---|---|
+| SPY | **+3.22%** | +15.71% | 13 | 92% | $10,322 |
+| QQQ | **+3.66%** | +25.98% | 14 | 79% | $10,366 |
+| NVDA | **+5.11%** | +30.43% | 16 | 75% | $10,511 |
+
+*注：策略做均值回归，非追涨，buy&hold 跑赢是正常的（大牛市）。实盘跑美股开盘时段5分钟K线。*
+
+### 其他策略（需连接 IBKR TWS 实盘验证）
+
+| 策略 / Strategy | 预期年化 | 风险 |
+|---|---|---|
+| Timezone Arbitrage | ~11% | ADR 流动性风险 |
+| HK IPO Pop | ~23% | 灰市数据获取 |
+| Long-term Portfolio | ~14% | 市场系统性风险 |
+
+*历史回测不代表未来收益。默认启用模拟交易（PAPER_TRADE=True）。*  
 *Past performance does not guarantee future results. Paper trading enabled by default.*
 
 ---
