@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+logs/
+*.db
+.env
+config/__pycache__/
+strategy/__pycache__/
