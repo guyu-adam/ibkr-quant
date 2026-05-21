@@ -210,4 +210,4 @@ if __name__ == '__main__':
     t.start()
     debug_mode = os.environ.get("PAPER_TRADING_DEBUG", "0") == "1"
     logger.info(f"Flask 启动于 http://127.0.0.1:8888  (debug={debug_mode})")
-    socketio.run(app, host='127.0.0.1', port=8888, debug=debug_mode)
+    socketio.run(app, host='127.0.0.1', port=8888, debug=debug_mode, allow_unsafe_werkzeug=True)
