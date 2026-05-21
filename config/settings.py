@@ -21,6 +21,7 @@ MAX_POSITION_PCT   = 0.10     # max 10% of equity in any single position
 MAX_TOTAL_EXPOSURE = 0.80     # max 80% of equity deployed
 MAX_DAILY_LOSS_PCT = 0.02     # halt trading after 2% daily drawdown
 STOP_LOSS_ATR_MULT = 2.0      # stop = entry ± 2×ATR(14)
+TRADE_RISK_PCT      = 0.01     # risk 1% of equity per trade
 
 # ── Momentum strategy (US stocks, intraday) ───────────────────────────────────
 WATCHLIST       = ["SPY", "QQQ", "AAPL", "MSFT", "NVDA", "TSLA", "AMZN"]

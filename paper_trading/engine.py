@@ -36,10 +36,13 @@ class PaperTradingEngine:
                 '000858': 'sz', '601318': 'sh',
             }
             codes = ','.join(f"{prefix_map[s]}{s}" for s in SYMBOLS)
+            proxies = None
+            if os.environ.get("DISABLE_PROXY", "0") == "1":
+                proxies = {'http': None, 'https': None}
             r = _requests.get(
                 f'https://qt.gtimg.cn/q={codes}',
                 headers={'Referer': 'https://gu.qq.com'},
-                timeout=8, proxies={'http': None, 'https': None}
+                timeout=8, proxies=proxies,
             )
             r.encoding = 'gbk'
             updated = 0

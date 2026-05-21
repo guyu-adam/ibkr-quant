@@ -6,12 +6,10 @@
 import logging
 from config.settings import (
     MAX_POSITION_PCT, MAX_TOTAL_EXPOSURE, MAX_DAILY_LOSS_PCT, STOP_LOSS_ATR_MULT,
-    ACCOUNT_EQUITY,
+    TRADE_RISK_PCT, ACCOUNT_EQUITY,
 )
 
 log = logging.getLogger(__name__)
-
-TRADE_RISK_PCT = 0.01   # risk 1% of equity per trade
 
 
 class RiskManager:

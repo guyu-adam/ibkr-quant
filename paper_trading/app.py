@@ -1,5 +1,6 @@
 """Flask Web App — 纸上交易仪表盘"""
 
+import os
 import threading
 import time
 import logging
@@ -198,5 +199,6 @@ if __name__ == '__main__':
     engine.running = True
     t = threading.Thread(target=engine_loop, daemon=True)
     t.start()
-    logger.info("Flask 启动于 http://0.0.0.0:8888")
-    socketio.run(app, host='0.0.0.0', port=8888, allow_unsafe_werkzeug=True)
+    debug_mode = os.environ.get("PAPER_TRADING_DEBUG", "0") == "1"
+    logger.info(f"Flask 启动于 http://127.0.0.1:8888  (debug={debug_mode})")
+    socketio.run(app, host='127.0.0.1', port=8888, debug=debug_mode)

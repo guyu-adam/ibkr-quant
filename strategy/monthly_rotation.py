@@ -39,13 +39,33 @@ def get_momentum_scores(
     symbols = universe or UNIVERSE
     rows = []
 
+    # Batch download all symbols at once (single yfinance call)
+    try:
+        data = yf.download(
+            " ".join(symbols),
+            period=f"{lookback_months + 1}mo",
+            interval="1d",
+            group_by="ticker",
+            progress=False,
+            auto_adjust=True,
+        )
+    except Exception as e:
+        log.warning(f"Batch download failed, falling back to per-symbol: {e}")
+        data = None
+
     for sym in symbols:
         try:
-            hist = yf.Ticker(sym).history(period=f"{lookback_months + 1}mo")
-            if hist.empty or len(hist) < 20:
+            if data is not None and sym in data:
+                # Extract this symbol's close series from MultiIndex
+                close = data[sym]["Close"].dropna()
+            else:
+                # Fallback: per-symbol download
+                hist = yf.Ticker(sym).history(period=f"{lookback_months + 1}mo")
+                close = hist["Close"].dropna()
+            if close.empty or len(close) < 20:
                 continue
-            start_px = float(hist["Close"].iloc[0])
-            end_px = float(hist["Close"].iloc[-1])
+            start_px = float(close.iloc[0])
+            end_px = float(close.iloc[-1])
             if start_px <= 0:
                 continue
             momentum = (end_px - start_px) / start_px

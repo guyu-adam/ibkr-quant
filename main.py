@@ -68,8 +68,12 @@ def show_status(broker: IBKRBroker):
         nlv = broker.net_liquidation()
         pnl = broker.daily_pnl()
         pos = broker.positions()
-        print(f"  Net Liquidation:  ${nlv:,.2f}")
-        print(f"  Daily P&L:        ${pnl:,.2f}  ({pnl/nlv*100:.2f}%)")
+        if nlv is None or nlv <= 0:
+            print(f"  Net Liquidation:  (unavailable)")
+            print(f"  Daily P&L:        ${pnl:,.2f}")
+        else:
+            print(f"  Net Liquidation:  ${nlv:,.2f}")
+            print(f"  Daily P&L:        ${pnl:,.2f}  ({pnl/nlv*100:.2f}%)")
         print(f"  Open Positions:   {len(pos)}")
         for sym, qty in pos.items():
             print(f"    {sym:<10} {qty:>8} shares")

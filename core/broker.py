@@ -15,21 +15,20 @@ RETRY_BASE_DELAY = 1.0   # seconds, exponential backoff: 1s → 2s → 4s
 
 
 def _retry(func):
-    """Decorator: exponential backoff retry on IBKR network errors."""
+    """Decorator: exponential backoff retry on transient IBKR errors."""
     def wrapper(*args, **kwargs):
         last_err = None
         for attempt in range(RETRY_ATTEMPTS):
             try:
                 return func(*args, **kwargs)
-            except ConnectionError as e:
+            except (ConnectionError, TimeoutError, OSError) as e:
                 last_err = e
-                delay = RETRY_BASE_DELAY * (2 ** attempt)
-                log.warning(f"IBKR call failed (attempt {attempt + 1}/{RETRY_ATTEMPTS}): {e}")
-                time.sleep(delay)
-            except Exception as e:
-                # Non-network errors should not be retried
-                raise
-        raise ConnectionError(f"IBKR call failed after {RETRY_ATTEMPTS} attempts: {last_err}")
+                if attempt < RETRY_ATTEMPTS - 1:
+                    delay = RETRY_BASE_DELAY * (2 ** attempt)
+                    log.warning(f"IBKR call failed (attempt {attempt + 1}/{RETRY_ATTEMPTS}): {e}")
+                    time.sleep(delay)
+                else:
+                    raise ConnectionError(f"IBKR call failed after {RETRY_ATTEMPTS} attempts: {last_err}")
     return wrapper
 
 
@@ -49,6 +48,7 @@ class IBKRBroker:
         return self.ib.managedAccounts()[0]
 
     # ── 账户信息 ─────────────────────────────────────────────────────────────
+    @_retry
     def net_liquidation(self) -> float | None:
         vals = self.ib.accountValues(self.account())
         for v in vals:
@@ -56,6 +56,7 @@ class IBKRBroker:
                 return float(v.value)
         return None
 
+    @_retry
     def positions(self) -> dict:
         """返回 {symbol: quantity}"""
         return {
@@ -63,6 +64,7 @@ class IBKRBroker:
             for p in self.ib.positions()
         }
 
+    @_retry
     def daily_pnl(self) -> float:
         pnl = self.ib.pnl()
         return sum(p.dailyPnL or 0 for p in pnl)
@@ -74,6 +76,7 @@ class IBKRBroker:
         return c
 
     # ── 订单 ─────────────────────────────────────────────────────────────────
+    @_retry
     def market_order(self, symbol: str, qty: int, action: str):
         """action: 'BUY' or 'SELL'"""
         contract = self.get_contract(symbol)
@@ -82,6 +85,7 @@ class IBKRBroker:
         log.info(f"Market {action} {abs(qty)} {symbol}  trade={trade.order.orderId}")
         return trade
 
+    @_retry
     def limit_order(self, symbol: str, qty: int, action: str, price: float):
         contract = self.get_contract(symbol)
         order = LimitOrder(action, abs(qty), round(price, 2))
@@ -100,12 +104,14 @@ class IBKRBroker:
         self.ib.reqMktData(contract, "", False, False)
         return contract
 
+    @_retry
     def last_price(self, symbol: str) -> float:
         contract = self.get_contract(symbol)
         ticker = self.ib.ticker(contract)
         return ticker.last or ticker.close or 0.0
 
     # ── 历史 K 线（用于指标计算）────────────────────────────────────────────
+    @_retry
     def get_bars(self, symbol: str, duration="2 D", bar_size="5 mins"):
         contract = self.get_contract(symbol)
         bars = self.ib.reqHistoricalData(
