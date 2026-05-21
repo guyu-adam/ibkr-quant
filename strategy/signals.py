@@ -15,7 +15,7 @@
 
 import numpy as np
 import pandas as pd
-from config.settings import RSI_PERIOD, RSI_OVERSOLD, RSI_OVERBOUGHT, MOM_FAST, MOM_SLOW, ATR_PERIOD
+from config.settings import RSI_PERIOD, RSI_OVERSOLD, RSI_OVERBOUGHT, MOM_FAST, MOM_SLOW, ATR_PERIOD, STOP_LOSS_ATR_MULT
 
 
 def ema(series: pd.Series, period: int) -> pd.Series:
@@ -28,8 +28,12 @@ def rsi(close: pd.Series, period: int = 14) -> pd.Series:
     loss  = -delta.clip(upper=0)
     avg_g = gain.ewm(span=period, adjust=False).mean()
     avg_l = loss.ewm(span=period, adjust=False).mean()
+    # RSI = 100 when no losses (avg_l == 0), but only after warmup
     rs = avg_g / avg_l.replace(0, np.nan)
-    return 100 - 100 / (1 + rs)
+    rsi_vals = 100 - 100 / (1 + rs)
+    rsi_vals[avg_l == 0] = 100.0   # no losses → RSI = 100
+    rsi_vals.iloc[:period] = np.nan  # warm-up period
+    return rsi_vals
 
 
 def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
@@ -84,7 +88,7 @@ def generate_signal(df: pd.DataFrame) -> dict:
         "signal":      signal,
         "price":       row["close"],
         "atr":         row["atr"],
-        "stop_long":   row["close"] - row["atr"] * 2.0,
-        "stop_short":  row["close"] + row["atr"] * 2.0,
+        "stop_long":   row["close"] - row["atr"] * STOP_LOSS_ATR_MULT,
+        "stop_short":  row["close"] + row["atr"] * STOP_LOSS_ATR_MULT,
         "reason":      reason,
     }

@@ -122,7 +122,7 @@ def run_live(args):
 
     engine = TradingEngine()
     try:
-        engine._main_loop()
+        engine.start()   # connects broker + enters main loop
     finally:
         log.info("Shutting down...")
         ipo_strat.close_all()

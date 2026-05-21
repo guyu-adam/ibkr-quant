@@ -13,7 +13,9 @@ import matplotlib.pyplot as plt
 import yfinance as yf
 
 from strategy.signals import compute_indicators, generate_signal
-from config.settings  import WATCHLIST, RSI_OVERSOLD, RSI_OVERBOUGHT, STOP_LOSS_ATR_MULT
+from config.settings  import WATCHLIST, RSI_OVERSOLD, RSI_OVERBOUGHT, STOP_LOSS_ATR_MULT, MOM_SLOW, ATR_PERIOD, MAX_POSITION_PCT
+
+MIN_LOOKBACK = MOM_SLOW + ATR_PERIOD + 10
 
 
 def run_backtest(symbol: str, start="2022-01-01", end="2025-01-01",
@@ -28,7 +30,7 @@ def run_backtest(symbol: str, start="2022-01-01", end="2025-01-01",
     df["signal"] = 0
 
     # 生成信号列
-    for i in range(40, len(df)):
+    for i in range(MIN_LOOKBACK, len(df)):
         s = generate_signal(df.iloc[:i+1])["signal"]
         df.iloc[i, df.columns.get_loc("signal")] = s
 
@@ -75,7 +77,7 @@ def run_backtest(symbol: str, start="2022-01-01", end="2025-01-01",
             atr_val   = row["atr"]
             stop_dist = atr_val * STOP_LOSS_ATR_MULT
             shares    = max(1, int(equity * 0.01 / stop_dist)) if stop_dist > 0 else 0
-            shares    = min(shares, int(equity * 0.10 / price))
+            shares    = min(shares, int(equity * MAX_POSITION_PCT / price))
             if shares > 0:
                 position = shares if sig == 1 else -shares
                 entry_px = price

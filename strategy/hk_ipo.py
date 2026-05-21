@@ -129,33 +129,52 @@ def place_ipo_trade(broker, risk_mgr, code: str, ipo_price: float,
     log.info(f"[IPO] BUY {code}  shares={shares}  ipo={ipo_price:.2f}  "
              f"target={target_px:.2f}  stop={stop_px:.2f}  grey={grey_premium:.1%}")
 
-    trade = broker.ib.placeOrder(contract, _bracket_order(
-        broker.ib, "BUY", shares, ipo_price, target_px, stop_px
-    ))
+    trade = _bracket_order(
+        broker.ib, contract, "BUY", shares, ipo_price, target_px, stop_px
+    )
     return trade
 
 
-def _bracket_order(ib, action, qty, entry, target, stop):
-    """OCA bracket: entry MKT + profit limit + stop loss."""
+def _bracket_order(ib, contract, action, qty, entry, target, stop):
+    """
+    Standard bracket order: parent → take_profit + stop_loss (OCA group).
+
+    Uses transmit flags so all three orders are submitted atomically:
+      1. Parent (transmit=False) — held at IBKR
+      2. Take-profit child (transmit=False) — held
+      3. Stop-loss child (transmit=True)  — activates the bracket
+    """
     from ib_insync import MarketOrder, LimitOrder, StopOrder
-    parent   = MarketOrder(action, qty)
+
+    oca_group = f"IPO_{qty}_{int(entry * 100)}"
+
+    # Parent entry order
+    parent = MarketOrder(action, qty)
     parent.transmit = False
+    parent.ocaGroup = oca_group
+    parent.ocaType = 1
 
-    take_profit         = LimitOrder("SELL", qty, round(target, 3))
-    take_profit.parentId = parent.orderId
+    trade_parent = ib.placeOrder(contract, parent)
+
+    # Take-profit (opposite action to exit)
+    exit_action = "SELL" if action == "BUY" else "BUY"
+    take_profit = LimitOrder(exit_action, qty, round(target, 3))
+    take_profit.parentId = trade_parent.order.orderId
     take_profit.transmit = False
+    take_profit.ocaGroup = oca_group
+    take_profit.ocaType = 1
 
-    stop_loss          = StopOrder("SELL", qty, round(stop, 3))
-    stop_loss.parentId = parent.orderId
+    trade_tp = ib.placeOrder(contract, take_profit)
+
+    # Stop-loss (last child with transmit=True activates the whole bracket)
+    stop_loss = StopOrder(exit_action, qty, round(stop, 3))
+    stop_loss.parentId = trade_parent.order.orderId
     stop_loss.transmit = True
+    stop_loss.ocaGroup = oca_group
+    stop_loss.ocaType = 1
 
-    for o in (parent, take_profit, stop_loss):
-        o.ocaGroup   = f"IPO_{qty}_{entry}"
-        o.ocaType    = 1
-
-    ib.placeOrder(ib.qualifyContracts(parent.contract if hasattr(parent, "contract") else None) or object(), parent)
-    ib.placeOrder(ib.qualifyContracts(take_profit.contract if hasattr(take_profit, "contract") else None) or object(), take_profit)
-    return stop_loss
+    trade_sl = ib.placeOrder(contract, stop_loss)
+    return trade_parent
 
 
 # ── strategy runner ───────────────────────────────────────────────────────────
@@ -191,7 +210,7 @@ class HKIPOStrategy:
                 break
             code      = item["code"]
             ipo_price = item["ipo_price"]
-            if not ipo_price:
+            if ipo_price <= 0:
                 continue
 
             grey = fetch_grey_premium(code)

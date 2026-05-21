@@ -4,37 +4,57 @@ pip install ib_insync
 """
 
 import logging
+import time
 from ib_insync import IB, Stock, MarketOrder, LimitOrder, util
 from config.settings import IBKR_HOST, IBKR_PORT, IBKR_CLIENT
 
 log = logging.getLogger(__name__)
 
+RETRY_ATTEMPTS = 3
+RETRY_BASE_DELAY = 1.0   # seconds, exponential backoff: 1s → 2s → 4s
+
+
+def _retry(func):
+    """Decorator: exponential backoff retry on IBKR network errors."""
+    def wrapper(*args, **kwargs):
+        last_err = None
+        for attempt in range(RETRY_ATTEMPTS):
+            try:
+                return func(*args, **kwargs)
+            except ConnectionError as e:
+                last_err = e
+                delay = RETRY_BASE_DELAY * (2 ** attempt)
+                log.warning(f"IBKR call failed (attempt {attempt + 1}/{RETRY_ATTEMPTS}): {e}")
+                time.sleep(delay)
+            except Exception as e:
+                # Non-network errors should not be retried
+                raise
+        raise ConnectionError(f"IBKR call failed after {RETRY_ATTEMPTS} attempts: {last_err}")
+    return wrapper
+
 
 class IBKRBroker:
     def __init__(self):
         self.ib = IB()
-        self._connected = False
 
     # ── 连接 / 断开 ──────────────────────────────────────────────────────────
     def connect(self):
         self.ib.connect(IBKR_HOST, IBKR_PORT, clientId=IBKR_CLIENT)
-        self._connected = True
         log.info(f"Connected to IBKR  port={IBKR_PORT}  account={self.account()}")
 
     def disconnect(self):
         self.ib.disconnect()
-        self._connected = False
 
     def account(self) -> str:
         return self.ib.managedAccounts()[0]
 
     # ── 账户信息 ─────────────────────────────────────────────────────────────
-    def net_liquidation(self) -> float:
+    def net_liquidation(self) -> float | None:
         vals = self.ib.accountValues(self.account())
         for v in vals:
             if v.tag == "NetLiquidation" and v.currency == "USD":
                 return float(v.value)
-        return 0.0
+        return None
 
     def positions(self) -> dict:
         """返回 {symbol: quantity}"""

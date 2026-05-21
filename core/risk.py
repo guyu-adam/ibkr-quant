@@ -5,10 +5,13 @@
 
 import logging
 from config.settings import (
-    MAX_POSITION_PCT, MAX_TOTAL_EXPOSURE, MAX_DAILY_LOSS_PCT, STOP_LOSS_ATR_MULT
+    MAX_POSITION_PCT, MAX_TOTAL_EXPOSURE, MAX_DAILY_LOSS_PCT, STOP_LOSS_ATR_MULT,
+    ACCOUNT_EQUITY,
 )
 
 log = logging.getLogger(__name__)
+
+TRADE_RISK_PCT = 0.01   # risk 1% of equity per trade
 
 
 class RiskManager:
@@ -20,16 +23,20 @@ class RiskManager:
     def position_size(self, price: float, atr: float) -> int:
         """
         波动率调整仓位（Volatility-adjusted sizing）
-        每笔风险 = 净值 × 1%，止损距离 = ATR × 倍数
+        每笔风险 = 净值 × TRADE_RISK_PCT，止损距离 = ATR × 倍数
         返回股数（整数）
         """
-        equity   = self.broker.net_liquidation()
-        risk_amt = equity * 0.01                        # 每笔最多亏净值 1%
+        equity = self.broker.net_liquidation()
+        if equity is None:
+            equity = ACCOUNT_EQUITY
+            log.warning(f"NLV unavailable, using fallback equity={equity}")
+        if equity <= 0:
+            return 0
+        risk_amt = equity * TRADE_RISK_PCT
         stop_dist = atr * STOP_LOSS_ATR_MULT
         if stop_dist <= 0:
             return 0
         shares = int(risk_amt / stop_dist)
-        # 同时不超过单票最大仓位
         max_shares = int(equity * MAX_POSITION_PCT / price)
         return min(shares, max_shares)
 
@@ -40,9 +47,15 @@ class RiskManager:
             return False
 
         equity = self.broker.net_liquidation()
+        if equity is None:
+            equity = ACCOUNT_EQUITY
+        if equity <= 0:
+            log.warning("Equity unavailable or zero — rejecting trade")
+            return False
 
         # 日亏损检查
-        if self.broker.daily_pnl() < -equity * MAX_DAILY_LOSS_PCT:
+        pnl = self.broker.daily_pnl()
+        if pnl < -equity * MAX_DAILY_LOSS_PCT:
             self._halted = True
             log.warning(f"Daily loss limit hit → trading halted")
             return False

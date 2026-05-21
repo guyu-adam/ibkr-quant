@@ -14,8 +14,11 @@ from core.risk   import RiskManager
 from strategy.signals import compute_indicators, generate_signal
 from config.settings import (
     WATCHLIST, BAR_SIZE, MARKET_OPEN, MARKET_CLOSE,
-    STOP_LOSS_ATR_MULT, SIGNAL_COOLDOWN
+    STOP_LOSS_ATR_MULT, SIGNAL_COOLDOWN,
+    RSI_PERIOD, MOM_SLOW, ATR_PERIOD,
 )
+
+MIN_BARS = MOM_SLOW + ATR_PERIOD + 10  # need enough bars for slow EMA + ATR + buffer
 
 log = logging.getLogger(__name__)
 ET  = pytz.timezone("America/New_York")
@@ -72,7 +75,7 @@ class TradingEngine:
             return
 
         df = self.broker.get_bars(symbol, duration="3 D", bar_size=BAR_SIZE)
-        if df is None or len(df) < 40:
+        if df is None or len(df) < MIN_BARS:
             return
 
         df   = compute_indicators(df)

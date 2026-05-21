@@ -26,7 +26,7 @@ class IBKRBrokerExtended(IBKRBroker):
         Columns: strike, expiry, call_bid, call_ask, put_bid, put_ask, iv
         """
         try:
-            if not self._connected:
+            if not self.ib.isConnected():
                 print(f"WARNING: Not connected to IBKR. Cannot fetch option chain for {symbol}.")
                 return pd.DataFrame()
 
@@ -86,7 +86,7 @@ class IBKRBrokerExtended(IBKRBroker):
         Returns a Series indexed by date.
         """
         try:
-            if not self._connected:
+            if not self.ib.isConnected():
                 print(f"WARNING: Not connected to IBKR. Cannot fetch historical IV for {symbol}.")
                 return pd.Series(dtype=float)
 
@@ -118,7 +118,7 @@ class IBKRBrokerExtended(IBKRBroker):
     def get_forex_rate(self, pair: str = "EURUSD") -> float:
         """Return the current forex rate for *pair*, e.g. 'EURUSD'."""
         try:
-            if not self._connected:
+            if not self.ib.isConnected():
                 print(f"WARNING: Not connected to IBKR. Cannot fetch forex rate for {pair}.")
                 return 0.0
 
@@ -141,7 +141,7 @@ class IBKRBrokerExtended(IBKRBroker):
         Returns DataFrame with columns: symbol, change_pct, volume, last_price
         """
         try:
-            if not self._connected:
+            if not self.ib.isConnected():
                 print("WARNING: Not connected to IBKR. Cannot run scanner.")
                 return pd.DataFrame()
 
@@ -180,7 +180,7 @@ class IBKRBrokerExtended(IBKRBroker):
         Returns list of dicts: [{headline, time, source}, ...]
         """
         try:
-            if not self._connected:
+            if not self.ib.isConnected():
                 print(f"WARNING: Not connected to IBKR. Cannot fetch news for {symbol}.")
                 return []
 
