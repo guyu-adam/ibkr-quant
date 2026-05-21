@@ -181,6 +181,12 @@ def _check_trading_hours():
 def engine_loop():
     """后台线程：每分钟更新行情 + 运行策略"""
     logger.info("交易引擎启动，初始资金 ¥100,000")
+
+    # 预热日线基准数据（异步，仅拉取一次 yfinance）
+    from pt_strategy import warmup_daily_ref
+    import threading as _th
+    _th.Thread(target=warmup_daily_ref, daemon=True).start()
+
     while engine.running:
         try:
             engine.update_quotes()

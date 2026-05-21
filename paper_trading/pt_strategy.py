@@ -1,155 +1,235 @@
 """
-Paper Trading 策略适配层 — 使用独立的 strategy.mean_reversion 策略
-不包含策略逻辑，只负责将 paper_trading engine 与策略对接
+Paper Trading 策略 — 轻量版（仅用腾讯实时行情，无需 yfinance）
+
+信号逻辑:
+  - 买入: 腾讯实时价 ≤ EMA 慢线(日线) 且 腾讯价相对昨日收盘跌幅>2% → 超跌反弹
+  - 卖出: 盈利>3% 或 亏损>2%止损
+  - 首次启动时通过 yfinance 拉取一次日线基准，后续只用腾讯实时价
 """
 
-import os, sys, logging
+import os, sys, logging, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.data_feed import CachedFeed, TencentFeed
-from strategy.mean_reversion import MeanReversionStrategy, PositionSizer
-from universe import SYMBOLS
+import pandas as pd
+import numpy as np
+
+from universe import SYMBOLS, SYMBOL_NAMES
 
 logger = logging.getLogger(__name__)
 
-# ── 初始化数据源和策略（全局单例）──────────────────────────────────────────────
-_data_feed = CachedFeed(
-    TencentFeed(disable_proxy=os.environ.get("DISABLE_PROXY", "0") == "1"),
-    ttl_seconds=300,
-)
+# ── 参数 ──────────────────────────────────────────────────────────────────────
+MAX_POSITIONS    = 8
+POSITION_PCT     = 0.10    # 每笔 10%
+TAKE_PROFIT_PCT  = 0.03    # 盈利 3% 止盈
+STOP_LOSS_PCT    = 0.02    # 亏损 2% 止损
+PRICE_BUFFER: dict[str, list] = {}  # {symbol: [prices]}
+BUFFER_MAX       = 30      # 最多保留 30 个价格点
 
-_strategy = MeanReversionStrategy({
-    'rsi_period': 14, 'rsi_oversold': 30, 'rsi_overbought': 70,
-    'atr_period': 14, 'atr_stop_mult': 2.0,
-    'macd_fast': 12, 'macd_slow': 26, 'macd_signal': 9,
-    'vol_lookback': 20, 'vol_spike_ratio': 1.2,
-    'min_score': 30, 'take_profit_pct': 0.05, 'hard_stop_pct': 0.03,
-    'name': 'mean_reversion',
-})
+# ── 日线基准（启动时通过 yfinance 拉取一次）──────────────────────────────────
+_daily_ref: dict[str, dict] = {}  # {symbol: {close, ema20, rsi14, atr14}}
 
-_sizer = PositionSizer(base_pct=0.08, max_pct=0.15, max_positions=8)
+
+def _to_yf(sym: str) -> str:
+    return f'{sym}.SS' if sym.startswith('6') else f'{sym}.SZ'
+
+
+def warmup_daily_ref():
+    """利用 yfinance 拉取一次日线基准数据（启动时调用，只跑一次）"""
+    import yfinance as yf
+    global _daily_ref
+    batch_size = 30
+    all_syms = SYMBOLS
+
+    for i in range(0, len(all_syms), batch_size):
+        batch = all_syms[i:i+batch_size]
+        tickers = ' '.join(_to_yf(s) for s in batch)
+        try:
+            df = yf.download(tickers, period='3mo', interval='1d',
+                             progress=False, auto_adjust=True, group_by='ticker')
+            for sym in batch:
+                try:
+                    tk = _to_yf(sym)
+                    if tk in df and not df[tk].empty:
+                        d = df[tk]
+                        close = d['Close'].astype(float)
+                        ema20 = close.ewm(span=20, adjust=False).mean().iloc[-1]
+                        # 简单 RSI(14)
+                        delta = close.diff()
+                        gain = delta.clip(lower=0).ewm(span=14, adjust=False).mean().iloc[-1]
+                        loss = (-delta).clip(lower=0).ewm(span=14, adjust=False).mean().iloc[-1]
+                        rs = gain / loss if loss > 0 else float('inf')
+                        rsi = 100 - 100/(1+rs) if loss > 0 else 100.0
+                        # ATR(14)
+                        h, l, c = d['High'].astype(float), d['Low'].astype(float), close
+                        tr = pd.concat([h-l, (h-c.shift()).abs(), (l-c.shift()).abs()], axis=1).max(axis=1)
+                        atr = tr.ewm(span=14, adjust=False).mean().iloc[-1]
+                        _daily_ref[sym] = {
+                            'close': float(close.iloc[-1]),
+                            'ema20': float(ema20),
+                            'rsi14': float(rsi),
+                            'atr14': float(atr),
+                        }
+                except Exception:
+                    pass
+            logger.info(f"日线基准: {len(_daily_ref)}/{len(all_syms)} 已加载")
+        except Exception as e:
+            logger.warning(f"yfinance批量拉取失败 batch={i}: {e}")
+            # 逐个 fallback
+            for sym in batch:
+                try:
+                    tk = _to_yf(sym)
+                    df = yf.download(tk, period='3mo', interval='1d', progress=False, auto_adjust=True)
+                    if df is not None and len(df) > 30:
+                        if isinstance(df.columns, pd.MultiIndex):
+                            df.columns = df.columns.droplevel(1)
+                        close = df['Close'].astype(float)
+                        ema20 = float(close.ewm(span=20, adjust=False).mean().iloc[-1])
+                        delta = close.diff()
+                        gain = delta.clip(lower=0).ewm(span=14, adjust=False).mean().iloc[-1]
+                        loss = (-delta).clip(lower=0).ewm(span=14, adjust=False).mean().iloc[-1]
+                        rs = gain / loss if loss > 0 else float('inf')
+                        rsi = 100 - 100/(1+rs) if loss > 0 else 100.0
+                        h = df['High'].astype(float); l = df['Low'].astype(float)
+                        tr = pd.concat([h-l,(h-close.shift()).abs(),(l-close.shift()).abs()],axis=1).max(axis=1)
+                        atr = float(tr.ewm(span=14,adjust=False).mean().iloc[-1])
+                        _daily_ref[sym] = {'close':float(close.iloc[-1]), 'ema20':ema20, 'rsi14':rsi, 'atr14':atr}
+                except Exception:
+                    pass
+    logger.info(f"日线基准加载完成: {len(_daily_ref)}/{len(all_syms)} 只")
+
+
+def add_quote(symbol: str, price: float):
+    """将实时行情加入缓冲区"""
+    if symbol not in PRICE_BUFFER:
+        PRICE_BUFFER[symbol] = []
+    PRICE_BUFFER[symbol].append(price)
+    if len(PRICE_BUFFER[symbol]) > BUFFER_MAX:
+        PRICE_BUFFER[symbol].pop(0)
 
 
 def evaluate(engine, symbol: str) -> str:
     """
-    Paper trading engine 调用入口。
-    返回 'buy' / 'sell' / 'hold'（兼容旧接口）
+    评估单个标的（纯实时行情驱动，不依赖 yfinance）
+    返回 'buy' / 'sell' / 'hold'
     """
-    from strategy.mean_reversion import PositionSizer
-
-    # 读取 engine 持仓转换为策略格式
-    positions = {}
+    # 获取实时价格
     with engine.lock:
-        for sym, pos in engine.positions.items():
-            positions[sym] = {
-                'shares': pos['shares'],
-                'avg_cost': pos.get('avg_cost', 0),
-                'stop_loss': pos.get('stop_loss', 0),
-            }
+        price = engine.latest_prices.get(symbol, 0)
+        npos = len(engine.positions)
+        pos = engine.positions.get(symbol)
 
-    result = _strategy.evaluate(_data_feed, symbol, positions)
+    if price <= 0:
+        return 'hold'
 
-    signal = result.get('signal', 'hold')
-    if signal == 'buy':
-        with engine.lock:
-            npos = len(engine.positions)
-        if npos >= _sizer.max_positions:
-            return 'hold'
-        # 检查该 symbol 是否已在持仓中
-        if symbol in positions:
-            return 'hold'
-        return 'buy'
-    elif signal == 'sell':
-        if symbol in positions:
+    add_quote(symbol, price)
+    ref = _daily_ref.get(symbol)
+
+    # ── 卖出逻辑 ──
+    if pos:
+        cost = pos.get('avg_cost', price)
+        gain_pct = (price - cost) / cost if cost > 0 else 0
+
+        # 止盈
+        if gain_pct >= TAKE_PROFIT_PCT:
+            logger.info(f"[{symbol}] 止盈: +{gain_pct:.1%}")
             return 'sell'
-    elif signal == 'hold' and result.get('new_stop') and symbol in positions:
-        # 更新移动止损
-        with engine.lock:
-            if symbol in engine.positions:
-                old = engine.positions[symbol].get('stop_loss', 0)
-                new = result['new_stop']
-                if new > old:
-                    engine.positions[symbol]['stop_loss'] = round(new, 2)
+        # 止损
+        if gain_pct <= -STOP_LOSS_PCT:
+            logger.info(f"[{symbol}] 止损: {gain_pct:.1%}")
+            return 'sell'
+        return 'hold'
+
+    # ── 买入逻辑 ──
+    if npos >= MAX_POSITIONS:
+        return 'hold'
+
+    # 需要日线基准
+    if ref is None:
+        return 'hold'
+
+    score = 0
+    reasons = []
+
+    # RSI 超卖
+    rsi = ref['rsi14']
+    if rsi < 30:
+        score += 40
+        reasons.append(f'RSI={rsi:.1f}')
+    elif rsi < 40:
+        score += 20
+        reasons.append(f'RSI={rsi:.1f}(偏弱)')
+
+    # 价格低于 EMA20（超跌）
+    ema20 = ref['ema20']
+    if price < ema20:
+        discount = (ema20 - price) / ema20
+        score += min(30, discount * 200)
+        reasons.append(f'折价{discount:.1%}')
+
+    # 日内短周期超跌：当前价 < 近10个实时价均值的 98%
+    buf = PRICE_BUFFER.get(symbol, [price])
+    if len(buf) >= 5:
+        avg10 = np.mean(buf[-min(10, len(buf)):])
+        if price < avg10 * 0.98:
+            score += 15
+            reasons.append(f'日内超跌')
+
+    if score >= 40:
+        logger.info(f"[{symbol}] 买入信号: {' | '.join(reasons)} score={score:.0f}")
+        return 'buy'
 
     return 'hold'
 
 
 def run_strategy(engine):
-    """遍历全市场，执行策略信号"""
-    portfolio_val = engine.total_value()
-
-    # 收集当前持仓
-    positions = {}
+    """遍历全市场，执行策略"""
+    # 先把行情缓冲
     with engine.lock:
-        for sym, pos in engine.positions.items():
-            positions[sym] = {
-                'shares': pos['shares'],
-                'avg_cost': pos.get('avg_cost', 0),
-                'stop_loss': pos.get('stop_loss', 0),
-            }
+        for sym, px in engine.latest_prices.items():
+            if px > 0:
+                add_quote(sym, px)
 
-    buy_candidates = []
-
+    # 收集买入候选
+    candidates = []
     for symbol in SYMBOLS:
         try:
-            result = _strategy.evaluate(_data_feed, symbol, positions)
-            signal = result.get('signal', 'hold')
-
-            if signal == 'buy':
-                buy_candidates.append((symbol, result['score']))
-            elif signal == 'sell':
+            sig = evaluate(engine, symbol)
+            if sig == 'buy':
+                # 计算简单评分
+                ref = _daily_ref.get(symbol)
+                score = 0
+                if ref:
+                    score = max(0, (30 - ref['rsi14']) * 2) + (ref['ema20'] / max(ref['close'], 0.01) - 1) * 100
+                candidates.append((symbol, score))
+            elif sig == 'sell':
                 engine.sell(symbol)
-            elif result.get('new_stop') and symbol in positions:
-                with engine.lock:
-                    if symbol in engine.positions:
-                        old = engine.positions[symbol].get('stop_loss', 0)
-                        new = result['new_stop']
-                        if new > old:
-                            engine.positions[symbol]['stop_loss'] = round(new, 2)
         except Exception as e:
-            logger.debug(f"策略评估 {symbol}: {e}")
+            logger.debug(f"评估{symbol}: {e}")
 
-    # 按评分排序买入最优标的
-    buy_candidates.sort(key=lambda x: x[1], reverse=True)
+    candidates.sort(key=lambda x: x[1], reverse=True)
 
     with engine.lock:
-        npos = len(engine.positions)
-        slots = _sizer.max_positions - npos
+        slots = MAX_POSITIONS - len(engine.positions)
 
-    for symbol, score in buy_candidates[:slots]:
+    portfolio_val = engine.total_value()
+
+    for symbol, score in candidates[:slots]:
         try:
-            df = _data_feed.fetch_history(symbol)
-            if df is None:
+            with engine.lock:
+                price = engine.latest_prices.get(symbol, 0)
+            if price <= 0:
                 continue
-            price = float(df['close'].iloc[-1])
-            high  = df['high'].astype(float)
-            low   = df['low'].astype(float)
-            close = df['close'].astype(float)
-            atr_df = pd.DataFrame({'high': high, 'low': low, 'close': close})
-            # Use strategy's ATR calculation
-            atr_vals = _strategy._atr(high, low, close, _strategy.atr_period)
-            cur_atr = float(atr_vals.iloc[-1])
-
-            shares = _sizer.size(portfolio_val, price, cur_atr)
-            if shares > 0:
-                # 用 engine 的 buy 方法（以金额买入）
-                amount = shares * price * 1.01  # 一点滑点缓冲
-                engine.buy(symbol, amount)
-                # 设置初始止损
+            amount = portfolio_val * POSITION_PCT
+            result = engine.buy(symbol, amount)
+            if result:
                 with engine.lock:
                     if symbol in engine.positions:
-                        stop = _strategy.trailing_stop(symbol, price, cur_atr, price)
-                        engine.positions[symbol]['stop_loss'] = round(stop, 2)
+                        engine.positions[symbol]['stop_loss'] = round(price * (1 - STOP_LOSS_PCT), 2)
+                logger.info(f"BUY {symbol} {SYMBOL_NAMES.get(symbol,'')} @{price:.2f}")
 
             with engine.lock:
-                npos = len(engine.positions)
-                slots = _sizer.max_positions - npos
+                slots = MAX_POSITIONS - len(engine.positions)
             if slots <= 0:
                 break
         except Exception as e:
-            logger.error(f"买入 {symbol}: {e}")
-
-
-# ── 辅助函数（保留给测试和外部调用）────────────────────────────────────────────
-def _to_yf_ticker(symbol: str) -> str:
-    return f'{symbol}.SS' if symbol.startswith('6') else f'{symbol}.SZ'
+            logger.error(f"买入{symbol}: {e}")
