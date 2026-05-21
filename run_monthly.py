@@ -11,7 +11,7 @@
 import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
 
-from strategy.monthly_rotation import get_momentum_scores, generate_orders
+from strategy.legacy.monthly_rotation import get_momentum_scores, generate_orders
 
 # ── 填写你的当前持仓（首次运行全填 0）────────────────────────────────────────
 CURRENT_HOLDINGS = {

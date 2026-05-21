@@ -12,7 +12,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import yfinance as yf
 
-from strategy.signals import compute_indicators, generate_signal
+from strategy.legacy.signals import compute_indicators, generate_signal
 from config.settings  import WATCHLIST, RSI_OVERSOLD, RSI_OVERBOUGHT, STOP_LOSS_ATR_MULT, MOM_SLOW, ATR_PERIOD, MAX_POSITION_PCT
 
 MIN_LOOKBACK = MOM_SLOW + ATR_PERIOD + 10

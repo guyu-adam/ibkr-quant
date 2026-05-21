@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch, MagicMock
 import pandas as pd
 import numpy as np
-from strategy.monthly_rotation import get_momentum_scores, generate_orders, UNIVERSE, TOP_N
+from strategy.legacy.monthly_rotation import get_momentum_scores, generate_orders, UNIVERSE, TOP_N
 
 
 class TestGetMomentumScores(unittest.TestCase):
@@ -17,34 +17,34 @@ class TestGetMomentumScores(unittest.TestCase):
             for i, sym in zip(range(1, n_options + 1), ["SPY", "QQQ", "AAPL", "MSFT", "NVDA"][:n_options])
         }
 
-    @patch("strategy.monthly_rotation.yf.download")
+    @patch("strategy.legacy.monthly_rotation.yf.download")
     def test_empty_universe(self, mock_dl):
         mock_dl.return_value = None  # batch download fails, fallback
-        with patch("strategy.monthly_rotation.yf.Ticker") as mock_ticker:
+        with patch("strategy.legacy.monthly_rotation.yf.Ticker") as mock_ticker:
             mock_tick = MagicMock()
             mock_tick.history.return_value = pd.DataFrame()
             mock_ticker.return_value = mock_tick
             result = get_momentum_scores(universe=[])
             self.assertTrue(result.empty)
 
-    @patch("strategy.monthly_rotation.yf.download")
+    @patch("strategy.legacy.monthly_rotation.yf.download")
     def test_batch_download_columns(self, mock_dl):
         """Verify output columns."""
         mock_dl.return_value = None  # triggers per-symbol fallback
         # We can't fully mock yf.Ticker easily; skip integration
         # Instead, test with a short universe that would be caught by exception
-        with patch("strategy.monthly_rotation.yf.Ticker") as mock_ticker:
+        with patch("strategy.legacy.monthly_rotation.yf.Ticker") as mock_ticker:
             mock_tick = MagicMock()
             mock_tick.history.return_value = pd.DataFrame()
             mock_ticker.return_value = mock_tick
             result = get_momentum_scores(universe=["FAKE"])
             self.assertTrue(result.empty)
 
-    @patch("strategy.monthly_rotation.yf.download")
+    @patch("strategy.legacy.monthly_rotation.yf.download")
     def test_result_has_required_columns(self, mock_dl):
         """Even on empty data, return columns should include required names."""
         mock_dl.return_value = None
-        with patch("strategy.monthly_rotation.yf.Ticker") as mock_ticker:
+        with patch("strategy.legacy.monthly_rotation.yf.Ticker") as mock_ticker:
             mock_tick = MagicMock()
             mock_tick.history.return_value = pd.DataFrame()
             mock_ticker.return_value = mock_tick

@@ -4,7 +4,7 @@ Unit tests for strategy/long_term.py
 import unittest
 from unittest.mock import MagicMock
 import pandas as pd
-from strategy.long_term import compute_target_weights, rebalance_trades
+from strategy.legacy.long_term import compute_target_weights, rebalance_trades
 
 
 class TestComputeTargetWeights(unittest.TestCase):

@@ -5,11 +5,11 @@ import unittest
 from unittest.mock import patch
 import pandas as pd
 import numpy as np
-from strategy.tz_arb import compute_signals, ADR_PAIRS
+from strategy.legacy.tz_arb import compute_signals, ADR_PAIRS
 
 
 class TestComputeSignals(unittest.TestCase):
-    @patch("strategy.tz_arb._get_close")
+    @patch("strategy.legacy.tz_arb._get_close")
     def test_no_signal_below_threshold(self, mock_get_close):
         """ADR move below threshold should produce no signal."""
         close_data = pd.Series([100.0, 101.0], index=pd.DatetimeIndex([
@@ -19,7 +19,7 @@ class TestComputeSignals(unittest.TestCase):
         signals = compute_signals(threshold=0.05)  # 5% threshold, 1% move → no signal
         self.assertEqual(len(signals), 0)
 
-    @patch("strategy.tz_arb._get_close")
+    @patch("strategy.legacy.tz_arb._get_close")
     def test_signal_above_threshold(self, mock_get_close):
         """ADR move above threshold should produce signal."""
         close_data = pd.Series([100.0, 104.0], index=pd.DatetimeIndex([
@@ -35,7 +35,7 @@ class TestComputeSignals(unittest.TestCase):
             self.assertIn("signal", s)
             self.assertIn("adr_move", s)
 
-    @patch("strategy.tz_arb._get_close")
+    @patch("strategy.legacy.tz_arb._get_close")
     def test_signal_direction_long(self, mock_get_close):
         """Positive ADR move should generate long signal (+1)."""
         close_data = pd.Series([100.0, 105.0], index=pd.DatetimeIndex([
@@ -46,7 +46,7 @@ class TestComputeSignals(unittest.TestCase):
         for s in signals:
             self.assertEqual(s["signal"], 1)
 
-    @patch("strategy.tz_arb._get_close")
+    @patch("strategy.legacy.tz_arb._get_close")
     def test_signal_direction_short(self, mock_get_close):
         """Negative ADR move should generate short signal (-1)."""
         close_data = pd.Series([100.0, 95.0], index=pd.DatetimeIndex([
@@ -57,7 +57,7 @@ class TestComputeSignals(unittest.TestCase):
         for s in signals:
             self.assertEqual(s["signal"], -1)
 
-    @patch("strategy.tz_arb._get_close")
+    @patch("strategy.legacy.tz_arb._get_close")
     def test_empty_data_graceful(self, mock_get_close):
         """Missing data for all pairs should return empty list, not crash."""
         mock_get_close.return_value = None

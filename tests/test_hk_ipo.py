@@ -3,21 +3,21 @@ Unit tests for strategy/hk_ipo.py — bracket order logic and scraping helpers.
 """
 import unittest
 from unittest.mock import MagicMock, patch
-from strategy.hk_ipo import (
+from strategy.legacy.hk_ipo import (
     fetch_listing_today, fetch_grey_premium,
     place_ipo_trade, HKIPOStrategy, _bracket_order,
 )
 
 
 class TestFetchListingToday(unittest.TestCase):
-    @patch("strategy.hk_ipo.requests.get")
+    @patch("strategy.legacy.hk_ipo.requests.get")
     def test_network_failure_graceful(self, mock_get):
         """Network failure should return empty list, not crash."""
         mock_get.side_effect = ConnectionError("timeout")
         result = fetch_listing_today()
         self.assertEqual(result, [])
 
-    @patch("strategy.hk_ipo.requests.get")
+    @patch("strategy.legacy.hk_ipo.requests.get")
     def test_empty_response(self, mock_get):
         """Empty HTML should return empty list."""
         mock_resp = MagicMock()
@@ -30,13 +30,13 @@ class TestFetchListingToday(unittest.TestCase):
 
 
 class TestFetchGreyPremium(unittest.TestCase):
-    @patch("strategy.hk_ipo.requests.get")
+    @patch("strategy.legacy.hk_ipo.requests.get")
     def test_network_failure_returns_none(self, mock_get):
         mock_get.side_effect = ConnectionError("timeout")
         result = fetch_grey_premium("9988")
         self.assertIsNone(result)
 
-    @patch("strategy.hk_ipo.requests.get")
+    @patch("strategy.legacy.hk_ipo.requests.get")
     def test_no_match_returns_none(self, mock_get):
         """No matching code in HTML should return None."""
         mock_resp = MagicMock()
@@ -55,22 +55,22 @@ class TestHKIPOStrategy(unittest.TestCase):
         self.risk_mgr.approve.return_value = True
         self.ipo = HKIPOStrategy(self.broker, self.risk_mgr)
 
-    @patch("strategy.hk_ipo.fetch_listing_today")
+    @patch("strategy.legacy.hk_ipo.fetch_listing_today")
     def test_no_listings(self, mock_list):
         mock_list.return_value = []
         self.ipo.run()  # should not crash
         self.assertEqual(len(self.ipo._active), 0)
 
-    @patch("strategy.hk_ipo.fetch_grey_premium")
-    @patch("strategy.hk_ipo.fetch_listing_today")
+    @patch("strategy.legacy.hk_ipo.fetch_grey_premium")
+    @patch("strategy.legacy.hk_ipo.fetch_listing_today")
     def test_listing_no_grey_premium(self, mock_list, mock_grey):
         mock_list.return_value = [{"code": "9988", "name": "TestCo", "ipo_price": 68.0}]
         mock_grey.return_value = None
         self.ipo.run()
         self.assertEqual(len(self.ipo._active), 0)
 
-    @patch("strategy.hk_ipo.fetch_grey_premium")
-    @patch("strategy.hk_ipo.fetch_listing_today")
+    @patch("strategy.legacy.hk_ipo.fetch_grey_premium")
+    @patch("strategy.legacy.hk_ipo.fetch_listing_today")
     def test_listing_below_threshold(self, mock_list, mock_grey):
         """Grey premium below min threshold should skip."""
         mock_list.return_value = [{"code": "9988", "name": "TestCo", "ipo_price": 68.0}]

@@ -11,7 +11,7 @@ import pytz
 
 from core.broker import IBKRBroker
 from core.risk   import RiskManager
-from strategy.signals import compute_indicators, generate_signal
+from strategy.legacy.signals import compute_indicators, generate_signal
 from config.settings import (
     WATCHLIST, BAR_SIZE, MARKET_OPEN, MARKET_CLOSE,
     STOP_LOSS_ATR_MULT, SIGNAL_COOLDOWN,

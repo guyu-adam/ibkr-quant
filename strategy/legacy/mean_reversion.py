@@ -7,7 +7,7 @@
   - 离线回测 (backtest.py)
 
 使用方式:
-    from strategy.mean_reversion import MeanReversionStrategy
+    from strategy.legacy.mean_reversion import MeanReversionStrategy
     strategy = MeanReversionStrategy(config)
     signal = strategy.evaluate(symbol, data_feed)
 """

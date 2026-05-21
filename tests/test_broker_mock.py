@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch, PropertyMock
 import pandas as pd
 import numpy as np
 from core.risk import RiskManager
-from strategy.signals import compute_indicators, generate_signal
+from strategy.legacy.signals import compute_indicators, generate_signal
 
 
 class TestRiskManagerWithMockBroker(unittest.TestCase):

@@ -4,7 +4,7 @@ Unit tests for strategy/signals.py
 import unittest
 import pandas as pd
 import numpy as np
-from strategy.signals import ema, rsi, atr, compute_indicators, generate_signal
+from strategy.legacy.signals import ema, rsi, atr, compute_indicators, generate_signal
 
 
 class TestEMA(unittest.TestCase):

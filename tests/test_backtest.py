@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch, MagicMock
 import pandas as pd
 import numpy as np
-from strategy.backtest import run_backtest, _max_drawdown
+from strategy.legacy.backtest import run_backtest, _max_drawdown
 
 
 class TestMaxDrawdown(unittest.TestCase):
@@ -24,13 +24,13 @@ class TestMaxDrawdown(unittest.TestCase):
 
 
 class TestRunBacktest(unittest.TestCase):
-    @patch("strategy.backtest.yf.download")
+    @patch("strategy.legacy.backtest.yf.download")
     def test_empty_data_returns_empty(self, mock_download):
         mock_download.return_value = pd.DataFrame()
         result = run_backtest("FAKE")
         self.assertEqual(result, {})
 
-    @patch("strategy.backtest.yf.download")
+    @patch("strategy.legacy.backtest.yf.download")
     def test_result_keys(self, mock_download):
         """Verify all expected keys are in the result dict."""
         dates = pd.date_range("2023-01-01", periods=200, freq="B")
@@ -47,7 +47,7 @@ class TestRunBacktest(unittest.TestCase):
                      "total_return", "sharpe", "max_drawdown", "equity_curve"]:
             self.assertIn(key, result)
 
-    @patch("strategy.backtest.yf.download")
+    @patch("strategy.legacy.backtest.yf.download")
     def test_no_trades_scenario(self, mock_download):
         """No triggers: RSI stays neutral (~50), no signals should fire."""
         n = 200
@@ -65,7 +65,7 @@ class TestRunBacktest(unittest.TestCase):
         self.assertEqual(result["total_trades"], 0)
         self.assertEqual(result["final_equity"], 10_000.0)
 
-    @patch("strategy.backtest.yf.download")
+    @patch("strategy.legacy.backtest.yf.download")
     def test_equity_curve_length(self, mock_download):
         """Equity curve should have length = len(data) + 1 (initial value)."""
         n = 100
@@ -82,7 +82,7 @@ class TestRunBacktest(unittest.TestCase):
         result = run_backtest("TEST")
         self.assertEqual(len(result["equity_curve"]), n + 1)
 
-    @patch("strategy.backtest.yf.download")
+    @patch("strategy.legacy.backtest.yf.download")
     def test_win_rate_in_range(self, mock_download):
         n = 200
         dates = pd.date_range("2023-01-01", periods=n, freq="B")

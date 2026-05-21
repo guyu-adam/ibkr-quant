@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from core.broker import IBKRBroker
 from core.risk import RiskManager
 from core.data_feed import YFinanceFeed, CachedFeed
-from strategy.mean_reversion import MeanReversionStrategy, PositionSizer
+from strategy.legacy.mean_reversion import MeanReversionStrategy, PositionSizer
 from config.settings import (
     IBKR_HOST, IBKR_PORT, IBKR_CLIENT, PAPER_TRADE,
     ACCOUNT_EQUITY, MAX_POSITION_PCT, MAX_TOTAL_EXPOSURE,
@@ -169,7 +169,7 @@ def run_status_cmd():
 def run_backtest_cmd():
     """CLI: 离线回测"""
     log.info("Running backtest...")
-    from strategy.backtest import run as bt_run
+    from strategy.legacy.backtest import run as bt_run
     bt_run()
 
 
