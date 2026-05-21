@@ -149,11 +149,18 @@ def evaluate(engine, symbol: str) -> str:
     if ref is None:
         return 'hold'
 
+    ema20 = ref['ema20']
+    rsi = ref['rsi14']
+
+    # ═══ P0 修复：趋势过滤 — 价格必须在 EMA20 上方才允许买入 ═══
+    # 避免在下跌趋势中反复抄底（"接飞刀"亏损模式）
+    if price < ema20:
+        return 'hold'
+
     score = 0
     reasons = []
 
-    # RSI 超卖
-    rsi = ref['rsi14']
+    # RSI 超卖 + 趋势确认 = 超跌反弹机会
     if rsi < 30:
         score += 40
         reasons.append(f'RSI={rsi:.1f}')
@@ -161,12 +168,12 @@ def evaluate(engine, symbol: str) -> str:
         score += 20
         reasons.append(f'RSI={rsi:.1f}(偏弱)')
 
-    # 价格低于 EMA20（超跌）
-    ema20 = ref['ema20']
-    if price < ema20:
-        discount = (ema20 - price) / ema20
-        score += min(30, discount * 200)
-        reasons.append(f'折价{discount:.1%}')
+    # EMA 确认（价格刚站上 EMA20 = 趋势转好信号）
+    if ema20 > 0 and price > ema20:
+        premium = (price - ema20) / ema20
+        if premium < 0.03:  # 刚突破，不是追高
+            score += 15
+            reasons.append(f'突破EMA20(+{premium:.1%})')
 
     # 日内短周期超跌：当前价 < 近10个实时价均值的 98%
     buf = PRICE_BUFFER.get(symbol, [price])

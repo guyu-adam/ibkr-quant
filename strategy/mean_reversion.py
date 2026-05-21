@@ -198,6 +198,13 @@ class MeanReversionStrategy(BaseStrategy):
         # ═══ 买入评分 ═══════════════════════════════════════════════════════
         score = 0.0
 
+        # P0 fix: 趋势过滤 — 价格必须在 EMA(30) 上方才允许买入
+        # 避免在下跌趋势中反复抄底（"接飞刀"亏损模式）
+        ema30 = close.ewm(span=30, adjust=False).mean().iloc[-1]
+        if cur_close < ema30:
+            result['reason'] = f'price {cur_close:.2f} < EMA30 {ema30:.2f} (downtrend)'
+            return result
+
         if cur_rsi < self.rsi_oversold:
             score += min(50, (self.rsi_oversold - cur_rsi) * 3)
 
