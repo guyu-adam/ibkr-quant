@@ -1,20 +1,23 @@
 """Flask Web App — 纸上交易仪表盘"""
 
-import os
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import threading
 import time
 import logging
 from flask import Flask, jsonify, render_template_string
 from flask_socketio import SocketIO
-from engine import PaperTradingEngine, SYMBOLS, SYMBOL_NAMES
-from strategy import run_strategy
+from engine import PaperTradingEngine
+from universe import SYMBOLS, SYMBOL_NAMES
+from pt_strategy import run_strategy
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(name)s] %(message)s')
 logger = logging.getLogger('app')
 
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins='*')
-engine = PaperTradingEngine(initial_cash=10000.0)
+engine = PaperTradingEngine(initial_cash=100000.0)
 
 # ── HTML 模板 ─────────────────────────────────────────────────
 HTML = """<!DOCTYPE html>
@@ -177,7 +180,7 @@ def _check_trading_hours():
 
 def engine_loop():
     """后台线程：每分钟更新行情 + 运行策略"""
-    logger.info("交易引擎启动，初始资金 ¥10,000")
+    logger.info("交易引擎启动，初始资金 ¥100,000")
     while engine.running:
         try:
             engine.update_quotes()
@@ -201,4 +204,4 @@ if __name__ == '__main__':
     t.start()
     debug_mode = os.environ.get("PAPER_TRADING_DEBUG", "0") == "1"
     logger.info(f"Flask 启动于 http://127.0.0.1:8888  (debug={debug_mode})")
-    socketio.run(app, host='127.0.0.1', port=8888, debug=debug_mode)
+    socketio.run(app, host='127.0.0.1', port=8888, debug=debug_mode, allow_unsafe_werkzeug=True)

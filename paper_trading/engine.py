@@ -1,19 +1,17 @@
 """纸上交易核心引擎"""
 
-import os
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import threading
 import datetime
 import time
 import logging
 import requests as _requests
 
-logger = logging.getLogger(__name__)
+from universe import SYMBOLS, SYMBOL_NAMES, PREFIX_MAP
 
-SYMBOLS = ['000001', '600519', '300750', '000858', '601318']
-SYMBOL_NAMES = {
-    '000001': '平安银行', '600519': '贵州茅台', '300750': '宁德时代',
-    '000858': '五粮液', '601318': '中国平安',
-}
+logger = logging.getLogger(__name__)
 
 
 class PaperTradingEngine:
@@ -31,11 +29,7 @@ class PaperTradingEngine:
     # ── 行情更新（腾讯财经接口，直连，绕过代理）──────────────
     def update_quotes(self):
         try:
-            prefix_map = {
-                '000001': 'sz', '600519': 'sh', '300750': 'sz',
-                '000858': 'sz', '601318': 'sh',
-            }
-            codes = ','.join(f"{prefix_map[s]}{s}" for s in SYMBOLS)
+            codes = ','.join(f"{PREFIX_MAP[s]}{s}" for s in SYMBOLS)
             proxies = None
             if os.environ.get("DISABLE_PROXY", "0") == "1":
                 proxies = {'http': None, 'https': None}

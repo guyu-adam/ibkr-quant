@@ -113,7 +113,7 @@ class TestPaperTradingEngine(unittest.TestCase):
 class TestSymbolMapping(unittest.TestCase):
     def test_sh_sz_prefixes(self):
         """6xxxxx → .SS (Shanghai), others → .SZ (Shenzhen)."""
-        from paper_trading.strategy import _to_yf_ticker
+        from paper_trading.pt_strategy import _to_yf_ticker
         self.assertTrue(_to_yf_ticker("600519").endswith(".SS"))
         self.assertTrue(_to_yf_ticker("000001").endswith(".SZ"))
         self.assertTrue(_to_yf_ticker("300750").endswith(".SZ"))
@@ -130,15 +130,15 @@ class TestSymbolNames(unittest.TestCase):
 class TestStrategyIntegration(unittest.TestCase):
     """Integration: strategy.evaluate() with mocked data."""
 
-    @patch("paper_trading.strategy.fetch_history")
+    @patch("core.data_feed.CachedFeed.fetch_history")
     def test_evaluate_hold_when_no_data(self, mock_fetch):
         mock_fetch.return_value = None
-        from paper_trading.strategy import evaluate
+        from paper_trading.pt_strategy import evaluate
         engine = PaperTradingEngine(initial_cash=10_000.0)
         result = evaluate(engine, "000001")
         self.assertEqual(result, "hold")
 
-    @patch("paper_trading.strategy.fetch_history")
+    @patch("core.data_feed.CachedFeed.fetch_history")
     def test_evaluate_returns_string(self, mock_fetch):
         import pandas as pd
         import numpy as np
@@ -146,15 +146,12 @@ class TestStrategyIntegration(unittest.TestCase):
         dates = pd.date_range("2024-01-01", periods=n, freq="D")
         close = np.linspace(100, 80, n)  # downtrend
         df = pd.DataFrame({
-            "日期": dates,
-            "开盘": close - 0.5,
-            "收盘": close,
-            "最高": close + 1,
-            "最低": close - 1,
-            "成交量": np.random.randint(10000, 100000, n),
-        })
+            'open': close - 0.5, 'high': close + 1,
+            'low': close - 1, 'close': close,
+            'volume': np.random.randint(10000, 100000, n),
+        }, index=dates)
         mock_fetch.return_value = df
-        from paper_trading.strategy import evaluate
+        from paper_trading.pt_strategy import evaluate
         engine = PaperTradingEngine(initial_cash=10_000.0)
         result = evaluate(engine, "000001")
         self.assertIn(result, ["buy", "sell", "hold"])

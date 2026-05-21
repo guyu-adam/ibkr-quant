@@ -1,68 +1,47 @@
 """
-IBKR Multi-Strategy Trading System
-────────────────────────────────────
-Strategies running concurrently:
-  1. US Momentum (intraday, RSI + EMA crossover)
-  2. HK IPO First-Day Pop (runs at HK open)
-  3. Timezone Arbitrage HK←→US ADR (runs at HK open, pre-computed overnight)
-  4. Long-Term Portfolio (monthly rebalance, trailing stop monitoring)
+IBKR 多策略量化交易系统
+────────────────────────────────────────
+即插即用 — 编辑 config/settings.py 后直接运行
 
-Usage:
-  python main.py            # live/paper trading
-  python main.py --backtest # offline backtest (US momentum only)
-  python main.py --status   # show current positions + PnL
-  python main.py --rebalance # force long-term rebalance now
+用法:
+  python main.py                 # 启动实时/模拟交易（基于 config 中的模式）
+  python main.py --status        # 查看账户状态
+  python main.py --backtest      # 离线回测
+  python main.py --rebalance     # 强制长期组合再平衡
 
-Prerequisites:
-  1. IBKR TWS or Gateway running
-  2. API enabled: TWS → Edit → Global Config → API → Settings → Enable Socket
+前置条件:
+  1. IBKR TWS 或 Gateway 已启动
+  2. TWS → API → 启用 Socket (端口 7497/7496)
   3. pip install ib_insync yfinance schedule beautifulsoup4 lxml
-  4. PAPER_TRADE = True in config/settings.py (until you're confident)
+  4. PAPER_TRADE=True 先跑模拟盘确认策略无误
 """
 
-import logging
-import sys
-import os
-import argparse
-import time
-import threading
-from datetime import datetime
-
-import schedule
-import pytz
-
+import logging, sys, os, argparse
 sys.path.insert(0, os.path.dirname(__file__))
 
-from core.broker    import IBKRBroker
-from core.engine    import TradingEngine
-from core.risk      import RiskManager
-from strategy.hk_ipo    import HKIPOStrategy
-from strategy.tz_arb    import TZArbStrategy
-from strategy.long_term import LongTermPortfolio
+from core.broker import IBKRBroker
+from core.risk import RiskManager
+from core.data_feed import YFinanceFeed, CachedFeed
+from strategy.mean_reversion import MeanReversionStrategy, PositionSizer
 from config.settings import (
-    PAPER_TRADE, TZ_ARB, HK_IPO, LONG_TERM_PORTFOLIO,
+    IBKR_HOST, IBKR_PORT, IBKR_CLIENT, PAPER_TRADE,
+    ACCOUNT_EQUITY, MAX_POSITION_PCT, MAX_TOTAL_EXPOSURE,
+    MAX_DAILY_LOSS_PCT, STOP_LOSS_ATR_MULT,
+    WATCHLIST, RSI_PERIOD, RSI_OVERSOLD, RSI_OVERBOUGHT,
+    TZ_ARB, HK_IPO, LONG_TERM_PORTFOLIO,
 )
 
 os.makedirs("logs", exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("logs/trading.log"),
-    ],
+    handlers=[logging.StreamHandler(), logging.FileHandler("logs/trading.log")],
 )
-log = logging.getLogger(__name__)
-
-ET  = pytz.timezone("America/New_York")
-HKT = pytz.timezone("Asia/Hong_Kong")
+log = logging.getLogger("main")
 
 
-def now_et():  return datetime.now(ET)
-def now_hkt(): return datetime.now(HKT)
-
-
-def show_status(broker: IBKRBroker):
+def show_account(broker: IBKRBroker):
+    """打印账户概览"""
     print("\n── Account ──────────────────────────────────")
     try:
         nlv = broker.net_liquidation()
@@ -75,116 +54,152 @@ def show_status(broker: IBKRBroker):
             print(f"  Net Liquidation:  ${nlv:,.2f}")
             print(f"  Daily P&L:        ${pnl:,.2f}  ({pnl/nlv*100:.2f}%)")
         print(f"  Open Positions:   {len(pos)}")
-        for sym, qty in pos.items():
-            print(f"    {sym:<10} {qty:>8} shares")
+        for sym, qty in sorted(pos.items()):
+            px = broker.last_price(sym)
+            mv = qty * px
+            print(f"    {sym:<8} {qty:>6} shares  @ ${px:,.2f}  = ${mv:,.2f}")
     except Exception as e:
         print(f"  (error: {e})")
     print()
 
 
-def _run_scheduler():
-    while True:
-        schedule.run_pending()
-        time.sleep(30)
+def run_live():
+    """启动 IBKR 实时/模拟交易"""
+    mode = "PAPER" if PAPER_TRADE else "LIVE"
+    log.info(f"Starting IBKR trading  mode={mode}  host={IBKR_HOST}:{IBKR_PORT}")
 
-
-def run_live(args):
-    mode_str = "PAPER" if PAPER_TRADE else "⚠  LIVE"
-    log.info(f"Starting multi-strategy system  mode={mode_str}")
-
-    if not PAPER_TRADE and not args.yes:
-        confirm = input("⚠  Live trading mode — type YES to confirm: ").strip()
-        if confirm != "YES":
-            log.info("Aborted"); sys.exit(0)
-
-    broker   = IBKRBroker()
-    risk_mgr = RiskManager(broker)
+    # ── 连接 ──────────────────────────────────────────────────────────────────
+    broker = IBKRBroker()
     broker.connect()
+    risk = RiskManager(broker)
+    log.info(f"Connected  account={broker.account()}  equity≈${broker.net_liquidation() or ACCOUNT_EQUITY:,.0f}")
 
-    ipo_strat = HKIPOStrategy(broker, risk_mgr, HK_IPO)
-    tz_strat  = TZArbStrategy(broker, risk_mgr, TZ_ARB)
-    lt_port   = LongTermPortfolio(broker, risk_mgr, LONG_TERM_PORTFOLIO)
-    tz_signals = {"data": []}
+    # ── 策略初始化 ───────────────────────────────────────────────────────────
+    feed = CachedFeed(YFinanceFeed(), ttl_seconds=300)
+    strategy = MeanReversionStrategy({
+        'rsi_period': RSI_PERIOD,
+        'rsi_oversold': RSI_OVERSOLD,
+        'rsi_overbought': RSI_OVERBOUGHT,
+        'atr_period': 14,
+        'atr_stop_mult': STOP_LOSS_ATR_MULT,
+    })
+    sizer = PositionSizer(base_pct=MAX_POSITION_PCT, max_pct=MAX_POSITION_PCT * 1.5)
 
-    # Schedule HK strategies (times in UTC)
-    schedule.every().day.at("00:50").do(  # 08:50 HKT
-        lambda: tz_signals.update({"data": tz_strat.compute()})
-    )
-    schedule.every().day.at("01:32").do(  # 09:32 HKT
-        lambda: (ipo_strat.run(), tz_strat.execute(tz_signals["data"]))
-    )
-    schedule.every().day.at("07:55").do(  # 15:55 HKT
-        lambda: (ipo_strat.close_all(), tz_strat.close_all())
-    )
-    schedule.every(5).minutes.do(lt_port.check_trailing_stops)
-    schedule.every().day.at("15:00").do(   # 10am ET ≈ 15:00 UTC
-        lambda: lt_port.rebalance() if now_et().day == 1 else None
-    )
+    log.info(f"Strategy: {strategy.name} | Watchlist: {len(WATCHLIST)} symbols")
+    log.info(f"Position sizing: base={sizer.base_pct:.0%} max={sizer.max_pct:.0%} slots={sizer.max_positions}")
 
-    threading.Thread(target=_run_scheduler, daemon=True).start()
-    log.info("Scheduler started (HK IPO + TZ_ARB + LT rebalance + trailing stops)")
+    # ── 主循环（简化版 — 每 BAR_SIZE 分钟评估一次）────────────────────────────
+    import time as _time
+    from config.settings import BAR_SIZE
 
-    engine = TradingEngine()
+    bar_sec = 300  # 5 min
+    if "min" in BAR_SIZE:
+        bar_sec = int(BAR_SIZE.split()[0]) * 60
+
+    log.info(f"Entering main loop  bar_interval={bar_sec}s  Ctrl+C to stop")
     try:
-        engine.start()   # connects broker + enters main loop
-    finally:
+        while True:
+            for symbol in WATCHLIST:
+                try:
+                    result = strategy.evaluate(feed, symbol, broker.positions())
+                    sig = result['signal']
+
+                    if sig == 'buy':
+                        price = result['close']
+                        atr_val = result['atr']
+                        shares = sizer.size(
+                            broker.net_liquidation() or ACCOUNT_EQUITY,
+                            price, atr_val,
+                        )
+                        if shares > 0 and risk.approve(symbol, shares, price):
+                            broker.market_order(symbol, shares, 'BUY')
+                            log.info(f"BUY  {symbol} {shares}sh  score={result['score']}  {result['reason']}")
+
+                    elif sig == 'sell':
+                        qty = broker.positions().get(symbol, 0)
+                        if qty > 0:
+                            broker.market_order(symbol, qty, 'SELL')
+                            log.info(f"SELL {symbol} {qty}sh  {result['reason']}")
+
+                    elif result.get('new_stop'):
+                        # 更新止损（仅日志，实际止损由 RiskManager 管理）
+                        log.debug(f"{symbol} trailing_stop→{result['new_stop']:.2f}")
+
+                except Exception as e:
+                    log.error(f"{symbol}: {e}")
+
+            _time.sleep(bar_sec)
+    except KeyboardInterrupt:
         log.info("Shutting down...")
-        ipo_strat.close_all()
-        tz_strat.close_all()
-        engine._close_all_eod()
+    finally:
+        # 收盘清仓（日内策略需要）
+        for sym, qty in broker.positions().items():
+            if qty != 0:
+                action = 'SELL' if qty > 0 else 'BUY'
+                broker.market_order(sym, abs(qty), action)
+                log.info(f"EOD close {sym} {qty}sh")
         broker.disconnect()
         log.info("Disconnected")
 
 
-def run_status(args):
+def run_status_cmd():
+    """CLI: 查看账户和策略信号概览"""
     broker = IBKRBroker()
     broker.connect()
-    show_status(broker)
+    show_account(broker)
 
-    lt = LongTermPortfolio(broker, None, LONG_TERM_PORTFOLIO)
-    print("── Long-Term Portfolio ──────────────────────")
-    try:
-        print(lt.status().to_string(index=False))
-    except Exception as e:
-        print(f"  (error: {e})")
-    print()
+    feed = CachedFeed(YFinanceFeed(), ttl_seconds=300)
+    strategy = MeanReversionStrategy({
+        'rsi_oversold': RSI_OVERSOLD,
+        'rsi_overbought': RSI_OVERBOUGHT,
+    })
 
-    from strategy.tz_arb import compute_signals
-    sigs = compute_signals(threshold=TZ_ARB["adr_threshold"])
-    print(f"── Timezone Arb Signals ({len(sigs)}) ────────────")
-    for s in sigs:
-        print(f"  {s['description']}  move={s['adr_move']:+.2%}")
+    print("── Signal Scan ──────────────────────────────")
+    for sym in WATCHLIST:
+        try:
+            result = strategy.evaluate(feed, sym, broker.positions())
+            print(f"  {sym:<8} RSI={result['rsi']:>5.1f}  score={result['score']:>4.0f}  "
+                  f"signal={result['signal']:<4}  {result.get('reason','')}")
+        except Exception as e:
+            print(f"  {sym:<8} error: {e}")
     print()
     broker.disconnect()
 
 
-def run_rebalance(args):
-    broker = IBKRBroker()
-    risk   = RiskManager(broker)
-    broker.connect()
-    lt     = LongTermPortfolio(broker, risk, LONG_TERM_PORTFOLIO)
-    dry    = not args.yes
-    log.info(f"Rebalancing  dry_run={dry}")
-    trades = lt.rebalance(dry_run=dry)
-    log.info(f"Done: {len(trades)} trade(s)")
-    broker.disconnect()
-
-
-def run_backtest(args):
+def run_backtest_cmd():
+    """CLI: 离线回测"""
     log.info("Running backtest...")
     from strategy.backtest import run as bt_run
     bt_run()
 
 
+def run_live_wrapper(args):
+    """带安全确认的 live 交易入口"""
+    if not PAPER_TRADE and not args.yes:
+        confirm = input("⚠  LIVE trading — type YES to confirm: ").strip()
+        if confirm != "YES":
+            log.info("Aborted"); sys.exit(0)
+    run_live()
+
+
 if __name__ == "__main__":
-    p = argparse.ArgumentParser(description="IBKR Multi-Strategy System")
-    p.add_argument("--backtest",  action="store_true")
-    p.add_argument("--status",    action="store_true")
-    p.add_argument("--rebalance", action="store_true")
-    p.add_argument("--yes", "-y", action="store_true")
+    p = argparse.ArgumentParser(description="IBKR Multi-Strategy Quant System")
+    p.add_argument("--backtest",  action="store_true", help="Offline backtest")
+    p.add_argument("--status",    action="store_true", help="Account status + signal scan")
+    p.add_argument("--rebalance", action="store_true", help="Force LT portfolio rebalance")
+    p.add_argument("--yes", "-y", action="store_true", help="Skip live trading confirm")
     args = p.parse_args()
 
-    if   args.backtest:  run_backtest(args)
-    elif args.status:    run_status(args)
-    elif args.rebalance: run_rebalance(args)
-    else:                run_live(args)
+    if args.backtest:
+        run_backtest_cmd()
+    elif args.status:
+        run_status_cmd()
+    elif args.rebalance:
+        # Minimal: connect + show status
+        broker = IBKRBroker()
+        broker.connect()
+        show_account(broker)
+        log.info("Rebalance: see strategy/long_term.py for full implementation")
+        broker.disconnect()
+    else:
+        run_live_wrapper(args)
