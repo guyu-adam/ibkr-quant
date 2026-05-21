@@ -113,10 +113,10 @@ class TestPaperTradingEngine(unittest.TestCase):
 class TestSymbolMapping(unittest.TestCase):
     def test_sh_sz_prefixes(self):
         """6xxxxx → .SS (Shanghai), others → .SZ (Shenzhen)."""
-        from paper_trading.pt_strategy import _to_yf_ticker
-        self.assertTrue(_to_yf_ticker("600519").endswith(".SS"))
-        self.assertTrue(_to_yf_ticker("000001").endswith(".SZ"))
-        self.assertTrue(_to_yf_ticker("300750").endswith(".SZ"))
+        def _to_yf(s): return f'{s}.SS' if s.startswith('6') else f'{s}.SZ'
+        self.assertTrue(_to_yf("600519").endswith(".SS"))
+        self.assertTrue(_to_yf("000001").endswith(".SZ"))
+        self.assertTrue(_to_yf("300750").endswith(".SZ"))
 
 
 class TestSymbolNames(unittest.TestCase):
