@@ -152,9 +152,11 @@ def evaluate(engine, symbol: str) -> str:
     ema20 = ref['ema20']
     rsi = ref['rsi14']
 
-    # ═══ P0 修复：趋势过滤 — 价格必须在 EMA20 上方才允许买入 ═══
+    # ═══ P0 修复：趋势过滤 — 价格不能深跌（距EMA20不超过5%）═══
     # 避免在下跌趋势中反复抄底（"接飞刀"亏损模式）
-    if price < ema20:
+    # 允许微幅低于EMA（超跌反弹机会），但拒绝深度折价（>5%）
+    discount = (ema20 - price) / ema20 if ema20 > 0 else 0
+    if discount > 0.05:
         return 'hold'
 
     score = 0
