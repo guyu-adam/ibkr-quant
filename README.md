@@ -1,62 +1,116 @@
 # quant
 
-**多市场量化交易系统 — 覆盖美股、港股、加密货币、A 股**
+**多市场、多策略量化交易系统 — 覆盖美股、港股、加密货币、A 股，统一架构，热插拔接口。**
 
-Multi-market quantitative trading system: US stocks, HK stocks, crypto, A-shares.
+Multi-market, multi-strategy quantitative trading system. US stocks, HK stocks, crypto, A-shares — unified architecture, hot-swappable broker interfaces.
+
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://python.org)
+[![Tests](https://img.shields.io/badge/tests-38%2F38%20passed-brightgreen.svg)](tests/)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 ---
 
-## 项目结构
+## 系统架构
 
 ```
-quant/
-├── README.md
-├── main.py                     # 统一入口
-├── requirements.txt
-├── config/
-│   └── settings.py             # 全局配置
-├── strategies/                 # 量化算法
-│   ├── contracts.py            # 合约策略（永续合约网格震荡）
-│   ├── options.py              # 期权策略（备兑/保护性看跌/铁鹰）
-│   ├── leverage.py             # 杠杆策略（杠杆ETF/保证金多空配对）
-│   ├── fast_trading.py         # 快速交易（美股日内动量/RSI均值回归）
-│   ├── slow_trading.py         # 慢速交易（港股IPO打新/ADR时区套利）
-│   └── long_term.py            # 长期策略（组合管理/再平衡/定投）
-├── interfaces/                 # 对外接口
-│   ├── ibkr.py                 # Interactive Brokers
-│   ├── okx.py                  # OKX 欧易
-│   ├── schwab.py               # Charles Schwab 嘉信
-│   ├── ths.py                  # 同花顺（A股行情+交易）
-│   └── binance.py              # Binance 币安
-├── paper_trading/              # 模拟盘
-│   ├── engine.py
-│   └── app.py                  # Flask Web 仪表盘
-├── core/                       # 共用核心
-│   ├── strategy_base.py        # 策略抽象基类
-│   ├── risk.py                 # 风控模块
-│   ├── data_feed.py            # 数据源抽象（yfinance/腾讯/缓存）
-│   ├── engine.py               # 交易引擎
-│   ├── ml_model.py             # ML 模型（LightGBM收益预测）
-│   ├── alpha_factors.py        # Alpha 因子库
-│   ├── portfolio_optimizer.py  # 组合优化器
-│   └── analytics.py            # 量化分析工具
-└── tests/                      # 测试
+┌─────────────────────────────────────────────────────────────┐
+│                         main.py                              │
+│                   统一入口 / CLI / 调度                        │
+├─────────────────────────────────────────────────────────────┤
+│  strategies/                   interfaces/                  │
+│  ┌─────────────┐              ┌──────────────┐              │
+│  │ contracts   │              │    ibkr      │              │
+│  │ options     │              │    okx       │              │
+│  │ leverage    │──────────────│   schwab     │──────────────│
+│  │ fast_trading│  策略-接口    │    ths       │  券商/交易所   │
+│  │ slow_trading│   解耦       │  binance     │              │
+│  │ long_term   │              └──────────────┘              │
+│  └─────────────┘                                            │
+├─────────────────────────────────────────────────────────────┤
+│  core/                                                      │
+│  strategy_base  risk  data_feed  engine  ml_model           │
+│  alpha_factors  portfolio_optimizer  analytics              │
+├─────────────────────────────────────────────────────────────┤
+│  paper_trading/              tests/                         │
+│  模拟盘 Web 仪表盘            38 tests · 100% pass            │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## 策略矩阵
 
-| 策略 | 类型 | 市场 | 频率 | 接口 |
-|------|------|------|------|------|
-| 美股日内动量 | 快速交易 | US | 5分钟 | IBKR |
-| 合约网格震荡 | 合约 | Crypto | 实时 | OKX / Binance |
-| 保证金多空配对 | 杠杆 | US | 日频 | IBKR |
-| 杠杆ETF趋势 | 杠杆 | US | 日频 | IBKR / Schwab |
-| 期权备兑/铁鹰 | 期权 | US | 周频 | IBKR |
-| 港股IPO打新 | 慢速交易 | HK | 事件驱动 | IBKR |
-| ADR时区套利 | 慢速交易 | US→HK | 每日 | IBKR |
-| 长期组合管理 | 长期 | US | 月度 | IBKR / Schwab |
+### 快速交易 `strategies/fast_trading.py`
+| 策略 | 逻辑 | 频率 | 标的 |
+|------|------|------|------|
+| RSI 均值回归 | RSI(14) 超卖≤30 买入 + EMA30 趋势过滤 + MACD 背离确认 + 成交量验证 | 5 分钟 K 线 | SPY, QQQ, NVDA, AAPL, MSFT, TSLA, AMZN |
+
+### 合约 `strategies/contracts.py`
+| 策略 | 逻辑 | 频率 | 标的 |
+|------|------|------|------|
+| 网格震荡 | 在中间价上下各布 N 层网格，回调买入/反弹卖出，震荡市收割波动 | 实时 | OKX 永续合约 |
+
+### 期权 `strategies/options.py`
+| 策略 | 逻辑 | 频率 | 标的 |
+|------|------|------|------|
+| 备兑看涨 (Covered Call) | 持正股 + 卖虚值 Call，delta≈0.30，DTE≈30，收时间价值 | 月频 | 美股正股 |
+| 保护性看跌 (Protective Put) | 持正股 + 买虚值 Put，delta≈-0.20，DTE≈60，对冲尾部风险 | 月频 | 美股正股 |
+| 铁鹰 (Iron Condor) | 卖宽跨式 + 买保护，short delta≈0.16，DTE≈45，50%止盈 | 月频 | 美股指数 |
+
+### 杠杆 `strategies/leverage.py`
+| 策略 | 逻辑 | 频率 | 标的 |
+|------|------|------|------|
+| 杠杆 ETF 趋势 | EMA(20/50) 双均线趋势追踪 + ATR 波动率止损 | 日频 | TQQQ, SOXL, UPRO |
+| 保证金多空配对 | 同行业内做多强势+做空弱势，z-score 进出场，市场中性 | 日频 | 配对股票 |
+
+### 慢速交易 `strategies/slow_trading.py`
+| 策略 | 逻辑 | 频率 | 标的 |
+|------|------|------|------|
+| 港股 IPO 打新 | 灰市溢价≥15% → 首日开盘买入 → 目标捕获 60% 溢价 → 止损 5% | 事件驱动 | 港股新股 |
+| ADR→港股时区套利 | 美股 ADR 隔夜涨跌≥1.5% → 港股开盘顺势套利 → 1:2 盈亏比 | 每日 | ADR+港股正股 |
+
+### 长期策略 `strategies/long_term.py`
+| 策略 | 逻辑 | 频率 | 标的 |
+|------|------|------|------|
+| 组合再平衡 | 目标权重偏离>5% → 触发调仓 | 月度 | QQQ, SPY, NVDA 等 |
+| 定投加仓 (DCA) | 价格低于52周高点>15% → 额外加仓半份 | 每日检查 | 组合内标的 |
+| 移动止损 | 从峰值回撤>25% → 清仓该标的 | 每日检查 | 组合内标的 |
+
+---
+
+## 接口适配
+
+| 接口 | 文件 | 市场 | 状态 | 前置条件 |
+|------|------|------|------|----------|
+| **IBKR** | `interfaces/ibkr.py` | 美股/港股 | 可用 | TWS/Gateway 运行，API 端口开放 |
+| **OKX** | `interfaces/okx.py` | 永续合约 | 可用 | API Key + Secret + Passphrase |
+| **Binance** | `interfaces/binance.py` | 现货/合约 | 行情可用 | API Key + Secret（可选） |
+| **同花顺** | `interfaces/ths.py` | A 股 | 行情可用 | 腾讯财经免费行情 |
+| **嘉信** | `interfaces/schwab.py` | 美股/ETF | 骨架 | OAuth 2.0 注册 |
+
+### 连接示例
+
+```python
+# IBKR
+from interfaces.ibkr import IBKRBroker
+broker = IBKRBroker(host="127.0.0.1", port=7497)
+broker.connect()
+
+# OKX
+from interfaces.okx import OKXBroker
+broker = OKXBroker(api_key="...", secret_key="...", passphrase="...")
+broker.connect()
+
+# Binance
+from interfaces.binance import BinanceBroker
+broker = BinanceBroker(api_key="...", secret="...")
+broker.connect()
+
+# 同花顺（A股行情）
+from interfaces.ths import THSBroker
+broker = THSBroker()
+quotes = broker.get_realtime_quote(["000001", "600519"])
+```
 
 ---
 
@@ -66,37 +120,100 @@ quant/
 git clone git@github.com:guyu-adam/quant.git
 cd quant
 pip install -r requirements.txt
+```
 
-# 回测
-python main.py --backtest
+### CLI 命令
 
-# 账户状态 + 信号扫描
-python main.py --status
-
-# 长期组合再平衡
-python main.py --rebalance
-
-# 模拟盘 Web 仪表盘
-python main.py --paper
+```bash
+python main.py --backtest      # 离线回测（信号扫描，无需连接券商）
+python main.py --status        # IBKR 账户状态 + 实时信号扫描
+python main.py --rebalance     # 强制长期组合再平衡
+python main.py --paper         # 启动模拟盘 Web 仪表盘 (http://127.0.0.1:5000)
 ```
 
 ---
 
-## 风控
+## 配置
 
-- 单仓上限：权益的 10%
-- 总敞口上限：权益的 80%
-- 日亏损熔断：-2% 自动停止交易
-- 波动率自适应仓位（ATR-based sizing）
-- 所有策略共享 `RiskManager` 统一管控
+编辑 `config/settings.py`：
+
+```python
+# ── 券商 ──
+IBKR_HOST = "127.0.0.1"
+IBKR_PORT = 7497          # 7497=实盘 | 7496=模拟
+
+# ── 风控 ──
+ACCOUNT_EQUITY      = 10_000    # 账户本金
+MAX_POSITION_PCT    = 0.10      # 单仓上限 10%
+MAX_TOTAL_EXPOSURE  = 0.80      # 总敞口上限 80%
+MAX_DAILY_LOSS_PCT  = 0.02      # 日亏损熔断 2%
+STOP_LOSS_ATR_MULT  = 2.0       # ATR 止损倍数
+TRADE_RISK_PCT      = 0.01      # 每笔风险 1%
+
+# ── 策略参数 ──
+US_WATCHLIST  = ["SPY", "QQQ", "AAPL", "MSFT", "NVDA", "TSLA", "AMZN"]
+RSI_OVERSOLD  = 30
+RSI_OVERBOUGHT = 70
+LONG_TERM_PORTFOLIO = {"positions": {"QQQ": 0.25, "SPY": 0.20, ...}}
+```
+
+---
+
+## 风控体系
+
+所有策略共享统一的 `RiskManager` 风控模块：
+
+```
+订单请求
+  ├── 检查日亏损熔断 (≥-2% → 停止交易)
+  ├── 检查单仓上限 (≤10% 权益)
+  ├── 检查总敞口上限 (≤80% 权益)
+  ├── 波动率自适应仓位 (ATR-based sizing)
+  └── 通过 → 下单
+```
+
+---
+
+## 测试
+
+```bash
+pytest tests/ -v          # 运行全部 38 个测试
+pytest tests/ --cov=core  # 含覆盖率报告
+```
+
+```
+tests/
+├── test_strategy_base.py        # 策略基类接口验证 (8)
+├── test_risk.py                 # 风控模块 (9)
+├── test_alpha_factors.py        # 因子计算 (5)
+├── test_ml_model.py             # ML 模型 (5)
+├── test_paper_trading.py        # 模拟盘 (5)
+└── test_portfolio_optimizer.py  # 组合优化 (6)
+```
+
+---
+
+## 开发路线
+
+- [x] 统一架构重组（策略/接口/核心解耦）
+- [x] 6 大策略模块骨架搭建
+- [x] 5 个券商接口适配
+- [x] RSI 均值回归策略（完整实现）
+- [x] 长期组合管理（再平衡/DCA/移动止损）
+- [x] 合约网格震荡（完整实现）
+- [ ] 期权链分析 + 自动下单
+- [ ] 保证金配对交易实盘
+- [ ] 嘉信 OAuth 2.0 完整接入
+- [ ] 同花顺客户端交易协议
+- [ ] 实盘回测对比报告
 
 ---
 
 ## 免责声明
 
-本项目仅供学习和研究目的。不构成投资建议。实盘交易有损失本金的风险。
+本项目仅供学习和研究目的，不构成投资建议。实盘交易存在本金损失风险。请先在模拟盘中充分验证策略。
 
-For educational and research purposes only. Not financial advice.
+For educational and research purposes only. Not financial advice. Always validate on paper first.
 
 ---
 
