@@ -2,10 +2,6 @@
 模拟盘 — Flask Web 仪表盘。
 """
 
-import os
-import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from flask import Flask
 
 app = Flask(__name__)

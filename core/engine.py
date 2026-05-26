@@ -1,6 +1,10 @@
 """
-交易引擎主循环 v3 — 每周期拉取K线 → 策略评估 → 风控审批 → 下单。
-同时监控已有持仓的止损触发。
+交易引擎 v3 — 多策略循环 + EOD/小时 hooks + 风控 + 止损。
+
+支持：
+  - 实时策略 (on_bar / evaluate)
+  - 事件驱动策略 (日终 generate_signals / screen_and_trade)
+  - 自定义 hook 注册
 """
 
 import time
@@ -10,6 +14,7 @@ import pytz
 
 from interfaces.ibkr import IBKRBroker
 from core.risk import RiskManager
+from core.data_feed import VIXFeed
 from strategies.fast_trading import MeanReversionStrategy
 from config.settings import (
     WATCHLIST, BAR_SIZE, MARKET_OPEN, MARKET_CLOSE,
@@ -28,24 +33,50 @@ def _market_time(t_str: str) -> dtime:
 
 
 class TradingEngine:
+    """Multi-strategy trading engine with EOD/hourly hooks."""
+
     def __init__(self):
         self.broker = IBKRBroker()
         self.risk = RiskManager(self.broker)
-        self.strategy = MeanReversionStrategy()
+        self._vix = VIXFeed()
+        self._strategies: list = [MeanReversionStrategy()]
         self._stops: dict[str, float] = {}
         self._last_signal_time: dict[str, float] = {}
+        self._hooks_eod: list = []     # callable(broker, risk)
+        self._hooks_hourly: list = []  # callable(broker, risk)
+        self._last_hourly_run = 0
+
+    @property
+    def strategy(self):
+        return self._strategies[0] if self._strategies else None
+
+    def add_strategy(self, strategy):
+        self._strategies.append(strategy)
+
+    def add_eod_hook(self, hook):
+        """Register a callable for end-of-day processing (options/event-driven)."""
+        self._hooks_eod.append(hook)
+
+    def add_hourly_hook(self, hook):
+        """Register a callable for hourly processing."""
+        self._hooks_hourly.append(hook)
 
     # ── 生命周期 ─────────────────────────────────────────────────────────
     def start(self):
         self.broker.connect()
         self.risk.reset_halt()
-        self.strategy.start()
-        log.info("Engine started")
+        for s in self._strategies:
+            s.start()
+        log.info(f"Engine started: {len(self._strategies)} strategies, "
+                 f"{len(self._hooks_eod)} EOD hooks, "
+                 f"{len(self._hooks_hourly)} hourly hooks")
         try:
             self._main_loop()
         finally:
+            self._run_eod_hooks()
             self._close_all_eod()
-            self.strategy.stop()
+            for s in self._strategies:
+                s.stop()
             self.broker.disconnect()
             log.info("Engine stopped")
 
@@ -53,11 +84,29 @@ class TradingEngine:
     def _main_loop(self):
         bar_seconds = self._bar_to_seconds(BAR_SIZE)
         while True:
-            now_et = datetime.now(ET).time()
+            now = datetime.now(ET)
+            now_et = now.time()
+
             if not self._is_market_open(now_et):
                 log.info(f"Market closed ({now_et})  sleeping 60s")
                 time.sleep(60)
                 continue
+
+            # Update VIX
+            vix_val = self._vix.vix
+            self.risk.vix = vix_val
+            for s in self._strategies:
+                if hasattr(s, "set_vix"):
+                    s.set_vix(vix_val)
+
+            # Hourly hooks
+            if now.hour != self._last_hourly_run:
+                self._last_hourly_run = now.hour
+                for hook in self._hooks_hourly:
+                    try:
+                        hook(self.broker, self.risk)
+                    except Exception as e:
+                        log.error(f"Hourly hook: {e}")
 
             for symbol in WATCHLIST:
                 try:
@@ -76,7 +125,9 @@ class TradingEngine:
         positions = self.broker.positions()
         holding = positions.get(symbol, 0)
 
-        result = self.strategy.evaluate(
+        # Use first strategy for real-time signals
+        strat = self._strategies[0]
+        result = strat.evaluate(
             type("Feed", (), {
                 "fetch_history": lambda s, p="6mo", iv="1d":
                     self.broker.get_bars(s, duration="3 D", bar_size=BAR_SIZE)
@@ -90,7 +141,6 @@ class TradingEngine:
         if price <= 0:
             return
 
-        # ── 平仓 ─────────────────────────────────────────────────────────
         if holding != 0 and result["signal"] in ("sell",):
             action = "SELL" if holding > 0 else "BUY"
             log.info(f"[{symbol}] Close  {result['reason']}")
@@ -99,7 +149,6 @@ class TradingEngine:
             self._last_signal_time[symbol] = time.time()
             return
 
-        # ── 开仓 ─────────────────────────────────────────────────────────
         if holding == 0 and result["signal"] == "buy":
             atr_val = result.get("atr", price * 0.02)
             shares = self.risk.position_size(price, atr_val)
@@ -115,7 +164,6 @@ class TradingEngine:
                      f"stop={self._stops[symbol]:.2f}  {result['reason']}")
             self._last_signal_time[symbol] = time.time()
 
-    # ── 止损监控 ─────────────────────────────────────────────────────────
     def _check_stops(self):
         positions = self.broker.positions()
         for symbol, stop_price in list(self._stops.items()):
@@ -132,7 +180,13 @@ class TradingEngine:
                 self.broker.market_order(symbol, abs(qty), action)
                 self._stops.pop(symbol, None)
 
-    # ── 收盘全平 ─────────────────────────────────────────────────────────
+    def _run_eod_hooks(self):
+        for hook in self._hooks_eod:
+            try:
+                hook(self.broker, self.risk)
+            except Exception as e:
+                log.error(f"EOD hook: {e}")
+
     def _close_all_eod(self):
         for symbol, qty in self.broker.positions().items():
             if qty == 0:
@@ -144,7 +198,6 @@ class TradingEngine:
             except Exception as e:
                 log.error(f"[EOD] {symbol}: {e}")
 
-    # ── 工具 ─────────────────────────────────────────────────────────────
     @staticmethod
     def _is_market_open(t: dtime) -> bool:
         return _market_time(MARKET_OPEN) <= t <= _market_time(MARKET_CLOSE)

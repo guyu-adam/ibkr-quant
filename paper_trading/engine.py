@@ -2,12 +2,7 @@
 模拟盘核心引擎 — A 股纸上交易
 """
 
-import os
-import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 import logging
-from typing import Optional
 
 from core.broker_interface import BrokerInterface
 from core.data_feed import TencentFeed, DataFeed

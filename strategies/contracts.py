@@ -20,7 +20,8 @@ from config.settings import (
 
 log = logging.getLogger(__name__)
 
-STATE_FILE = "grid_state.json"
+def _state_file(instance_id: str = "default") -> str:
+    return f"grid_{instance_id}.json"
 
 
 class GridScalpStrategy(BaseStrategy):
@@ -33,6 +34,7 @@ class GridScalpStrategy(BaseStrategy):
         self.trend_filter    = cfg.get("trend_filter", GRID_TREND_FILTER)
         self.ema_period      = cfg.get("ema_period", GRID_EMA_PERIOD)
         self.position_pct    = cfg.get("position_pct", 0.05)
+        self.instance_id     = cfg.get("instance_id", "default")
         self._mid_price      = 0.0
         self._orders: dict[float, dict] = {}  # price → {side, size}
         self._price_history: list[float] = []
@@ -87,8 +89,9 @@ class GridScalpStrategy(BaseStrategy):
 
     def on_close(self) -> None:
         self._orders.clear()
-        if os.path.exists(STATE_FILE):
-            os.remove(STATE_FILE)
+        sf = _state_file(self.instance_id)
+        if os.path.exists(sf):
+            os.remove(sf)
 
     def _build_grid(self, mid: float, spacing: float, trend: str):
         self._orders.clear()
@@ -111,15 +114,16 @@ class GridScalpStrategy(BaseStrategy):
     def _save_state(self):
         try:
             state = {"mid_price": self._mid_price, "orders": self._orders}
-            with open(STATE_FILE, "w") as f:
+            with open(_state_file(self.instance_id), "w") as f:
                 json.dump(state, f, default=str)
         except Exception:
             pass
 
     def _load_state(self):
         try:
-            if os.path.exists(STATE_FILE):
-                with open(STATE_FILE) as f:
+            sf = _state_file(self.instance_id)
+            if os.path.exists(sf):
+                with open(sf) as f:
                     state = json.load(f)
                 self._mid_price = state.get("mid_price", 0.0)
                 self._orders = {float(k): v for k, v in state.get("orders", {}).items()}

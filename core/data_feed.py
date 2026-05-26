@@ -189,3 +189,33 @@ class CachedFeed(DataFeed):
                 del self._cache[k]
         else:
             self._cache.clear()
+
+
+class VIXFeed:
+    """VIX data feed from yfinance — used by risk manager and options strategies."""
+
+    def __init__(self):
+        self._vix = 20.0
+        self._last_fetch = 0.0
+
+    @property
+    def vix(self) -> float:
+        """Return current VIX, fetching from yfinance if cache is stale (>60s)."""
+        import time as _time
+        now = _time.time()
+        if now - self._last_fetch > 60:
+            try:
+                import yfinance as yf
+                info = yf.Ticker("^VIX").fast_info
+                px = info.last_price or info.previous_close
+                if px and px > 0:
+                    self._vix = float(px)
+                    self._last_fetch = now
+            except Exception:
+                pass
+        return self._vix
+
+    def set_manual(self, value: float):
+        """Override VIX value (for testing or offline use)."""
+        self._vix = value
+

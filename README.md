@@ -4,7 +4,7 @@
 
 Multi-market, multi-strategy quantitative trading system. US stocks, HK stocks, crypto, A-shares — unified architecture, hot-swappable broker interfaces.
 
-[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://python.org)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://python.org)
 [![Tests](https://img.shields.io/badge/tests-86%2F86%20passed-brightgreen.svg)](tests/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 

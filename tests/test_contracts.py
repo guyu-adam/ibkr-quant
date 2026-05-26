@@ -12,8 +12,9 @@ class TestGridScalpStrategy(unittest.TestCase):
         self.gs = GridScalpStrategy(self.cfg)
 
     def tearDown(self):
-        if os.path.exists("grid_state.json"):
-            os.remove("grid_state.json")
+        for f in ("grid_default.json", "grid_state.json"):
+            if os.path.exists(f):
+                os.remove(f)
 
     def test_name(self):
         self.assertEqual(self.gs.name, "grid_scalp")
@@ -42,7 +43,7 @@ class TestGridScalpStrategy(unittest.TestCase):
         self.gs._mid_price = 95.0
         self.gs._build_grid(95.0, 0.01, "both")
         self.gs._save_state()
-        self.assertTrue(os.path.exists("grid_state.json"))
+        self.assertTrue(os.path.exists("grid_default.json"))
 
         gs2 = GridScalpStrategy(self.cfg)
         self.assertEqual(gs2._mid_price, 95.0)

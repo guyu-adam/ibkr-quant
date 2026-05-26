@@ -13,11 +13,8 @@ Usage:
 """
 
 import logging
-import sys
 import os
 import argparse
-
-sys.path.insert(0, os.path.dirname(__file__))
 
 from config.settings import (
     IBKR_HOST, IBKR_PORT, IBKR_CLIENT, PAPER_TRADE, ACCOUNT_EQUITY,
@@ -172,7 +169,8 @@ def run_walkforward():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-if __name__ == "__main__":
+def main():
+    """CLI entry point — invoked via `quant` command after pip install."""
     p = argparse.ArgumentParser(description="quant v3 — Multi-Market Quant System")
     p.add_argument("--backtest",    action="store_true", help="Signal scan")
     p.add_argument("--status",      action="store_true", help="Account status")
@@ -202,3 +200,7 @@ if __name__ == "__main__":
         run_backtest()
     else:
         p.print_help()
+
+
+if __name__ == "__main__":
+    main()
