@@ -1,7 +1,6 @@
 __pycache__/
 *.pyc
-logs/
-*.db
+*.pyo
 .env
-config/__pycache__/
-strategy/__pycache__/
+logs/
+.pytest_cache/

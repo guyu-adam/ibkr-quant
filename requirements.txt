@@ -16,3 +16,4 @@ pytest-cov>=5.0
 matplotlib>=3.7
 python-okx>=1.0.0
 python-dotenv>=1.0.0
+flask>=2.3

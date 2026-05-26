@@ -1,154 +1,102 @@
-# ibkr-quant
+# quant
 
-**多策略 Interactive Brokers 量化交易系统 — 同时跑美股动量、时区套利、港股 IPO、长期组合四套策略。**
+**多市场量化交易系统 — 覆盖美股、港股、加密货币、A 股**
 
-**Multi-strategy quantitative trading system for Interactive Brokers — runs US momentum, timezone arbitrage, HK IPO pop, and long-term portfolio strategies concurrently.**
-
----
-
-[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://python.org)
-[![IBKR](https://img.shields.io/badge/broker-Interactive%20Brokers-red.svg)](https://interactivebrokers.com)
-[![Paper Trading](https://img.shields.io/badge/default-paper%20trading-green.svg)](config/settings.py)
-[![Markets](https://img.shields.io/badge/markets-US%20%2B%20HK-blue.svg)](strategy/)
+Multi-market quantitative trading system: US stocks, HK stocks, crypto, A-shares.
 
 ---
 
-## 四大策略 / Four Strategies
-
-### 1. 美股动量（日内）/ US Momentum (Intraday)
-RSI 均值回归 + EMA 趋势过滤，对 SPY/QQQ/NVDA 等大盘股进行 5 分钟 K 线交易。
-
-RSI mean-reversion + EMA trend filter on SPY, QQQ, AAPL, MSFT, NVDA, TSLA, AMZN. Trades 5-min bars.
+## 项目结构
 
 ```
-RSI(14) 超卖 ≤ 30  →  做多信号
-RSI(14) 超买 ≥ 70  →  做空信号（叠加 EMA 方向过滤）
-止损：entry ± 2×ATR(14)
+quant/
+├── README.md
+├── main.py                     # 统一入口
+├── requirements.txt
+├── config/
+│   └── settings.py             # 全局配置
+├── strategies/                 # 量化算法
+│   ├── contracts.py            # 合约策略（永续合约网格震荡）
+│   ├── options.py              # 期权策略（备兑/保护性看跌/铁鹰）
+│   ├── leverage.py             # 杠杆策略（杠杆ETF/保证金多空配对）
+│   ├── fast_trading.py         # 快速交易（美股日内动量/RSI均值回归）
+│   ├── slow_trading.py         # 慢速交易（港股IPO打新/ADR时区套利）
+│   └── long_term.py            # 长期策略（组合管理/再平衡/定投）
+├── interfaces/                 # 对外接口
+│   ├── ibkr.py                 # Interactive Brokers
+│   ├── okx.py                  # OKX 欧易
+│   ├── schwab.py               # Charles Schwab 嘉信
+│   ├── ths.py                  # 同花顺（A股行情+交易）
+│   └── binance.py              # Binance 币安
+├── paper_trading/              # 模拟盘
+│   ├── engine.py
+│   └── app.py                  # Flask Web 仪表盘
+├── core/                       # 共用核心
+│   ├── strategy_base.py        # 策略抽象基类
+│   ├── risk.py                 # 风控模块
+│   ├── data_feed.py            # 数据源抽象（yfinance/腾讯/缓存）
+│   ├── engine.py               # 交易引擎
+│   ├── ml_model.py             # ML 模型（LightGBM收益预测）
+│   ├── alpha_factors.py        # Alpha 因子库
+│   ├── portfolio_optimizer.py  # 组合优化器
+│   └── analytics.py            # 量化分析工具
+└── tests/                      # 测试
 ```
-
-### 2. 时区套利（ADR→港股）/ Timezone Arbitrage (ADR → HK)
-美股 ADR 隔夜涨跌幅 ≥ 1.5%，港股开盘时顺势套利港股对应正股，通常领先大陆市场反应。
-
-US ADR overnight move ≥ 1.5% triggers a HK open trade on the underlying. Exploits the price discovery lag between US ADR and HK ordinary shares.
-
-```
-触发条件：ADR 隔夜涨跌 > 1.5%
-风险：每笔 1% 权益
-止盈：1:2 风险/收益比
-```
-
-### 3. 港股 IPO 打新溢价 / HK IPO Pop
-灰市溢价 ≥ 15% 时，在 IPO 首日开盘买入，目标捕捉灰市溢价的 60%。
-
-Buy on IPO day open when grey-market premium ≥ 15%. Target: capture 60% of the grey-market premium.
-
-```
-最低灰市溢价：15%
-止损：IPO 发行价 -5%
-最大同时持仓：2 只
-```
-
-### 4. 长期组合 / Long-Term Portfolio
-每月再平衡一次，配置 QQQ(25%)、SPY(20%)、NVDA(15%)、BRK.B(10%)、新兴市场 ETF(10%) 等。
-
-Monthly rebalancing of a diversified long-term portfolio: QQQ 25%, SPY 20%, NVDA 15%, BRK.B 10%, EM ETF 10%, etc.
 
 ---
 
-## 回测结果 / Backtest Results
+## 策略矩阵
 
-### US Momentum — 5分钟 K 线实测（最近30个交易日，yfinance数据）
-
-> 在 RTX 5060 Ti Linux 机器上运行，$10,000 起始资金，RSI(14) + EMA(10/30) 过滤
-
-| 标的 | 30日收益 | 同期Buy&Hold | 交易次数 | 胜率 | 最终权益 |
-|---|---|---|---|---|---|
-| SPY | **+3.22%** | +15.71% | 13 | 92% | $10,322 |
-| QQQ | **+3.66%** | +25.98% | 14 | 79% | $10,366 |
-| NVDA | **+5.11%** | +30.43% | 16 | 75% | $10,511 |
-
-*注：策略做均值回归，非追涨，buy&hold 跑赢是正常的（大牛市）。实盘跑美股开盘时段5分钟K线。*
-
-### 其他策略（需连接 IBKR TWS 实盘验证）
-
-| 策略 / Strategy | 预期年化 | 风险 |
-|---|---|---|
-| Timezone Arbitrage | ~11% | ADR 流动性风险 |
-| HK IPO Pop | ~23% | 灰市数据获取 |
-| Long-term Portfolio | ~14% | 市场系统性风险 |
-
-*历史回测不代表未来收益。默认启用模拟交易（PAPER_TRADE=True）。*  
-*Past performance does not guarantee future results. Paper trading enabled by default.*
+| 策略 | 类型 | 市场 | 频率 | 接口 |
+|------|------|------|------|------|
+| 美股日内动量 | 快速交易 | US | 5分钟 | IBKR |
+| 合约网格震荡 | 合约 | Crypto | 实时 | OKX / Binance |
+| 保证金多空配对 | 杠杆 | US | 日频 | IBKR |
+| 杠杆ETF趋势 | 杠杆 | US | 日频 | IBKR / Schwab |
+| 期权备兑/铁鹰 | 期权 | US | 周频 | IBKR |
+| 港股IPO打新 | 慢速交易 | HK | 事件驱动 | IBKR |
+| ADR时区套利 | 慢速交易 | US→HK | 每日 | IBKR |
+| 长期组合管理 | 长期 | US | 月度 | IBKR / Schwab |
 
 ---
 
-## 快速开始 / Quick Start
+## 快速开始
 
 ```bash
-git clone https://github.com/guyu-adam/ibkr-quant.git
-cd ibkr-quant
+git clone git@github.com:guyu-adam/quant.git
+cd quant
 pip install -r requirements.txt
 
-# 1. 先跑回测验证策略 / Run backtest first
-python main.py backtest
+# 回测
+python main.py --backtest
 
-# 2. 开启 TWS 或 IB Gateway 后运行模拟 / Start TWS/Gateway then paper trade
-python main.py live
+# 账户状态 + 信号扫描
+python main.py --status
 
-# 3. 每月再平衡 / Monthly rebalance
-python run_monthly.py
+# 长期组合再平衡
+python main.py --rebalance
+
+# 模拟盘 Web 仪表盘
+python main.py --paper
 ```
-
-### IBKR 连接配置 / IBKR Connection
-
-打开 TWS → 全局配置 → API → 设置 → 勾选"启用 ActiveX 和 Socket"
-
-Open TWS → Global Config → API → Settings → Enable ActiveX and Socket Clients
-
-| 模式 / Mode | 端口 / Port |
-|---|---|
-| TWS 模拟 / TWS Paper | 7496 |
-| TWS 实盘 / TWS Live | 7497 |
-| Gateway 模拟 / GW Paper | 4002 |
-| Gateway 实盘 / GW Live | 4001 |
 
 ---
 
-## 风控 / Risk Management
+## 风控
 
 - 单仓上限：权益的 10%
 - 总敞口上限：权益的 80%
 - 日亏损熔断：-2% 自动停止交易
-- 所有策略共享 `RiskManager` 模块统一管控
+- 波动率自适应仓位（ATR-based sizing）
+- 所有策略共享 `RiskManager` 统一管控
 
 ---
 
-## 项目结构 / Structure
-
-```
-ibkr-quant/
-├── config/settings.py      # 所有参数配置 / All parameters
-├── core/
-│   ├── broker.py           # IBKR 连接封装 / IBKR connection wrapper
-│   ├── engine.py           # 策略调度引擎 / Strategy scheduler
-│   └── risk.py             # 风控模块 / Risk manager
-├── strategy/
-│   ├── signals.py          # 信号生成 / Signal generation
-│   ├── hk_ipo.py           # 港股 IPO 策略 / HK IPO strategy
-│   ├── tz_arb.py           # 时区套利 / Timezone arbitrage
-│   ├── long_term.py        # 长期组合 / Long-term portfolio
-│   └── backtest.py         # 回测引擎 / Backtest engine
-├── main.py                 # 入口 / Entry point
-└── run_monthly.py          # 月度任务 / Monthly task
-```
-
----
-
-## 免责声明 / Disclaimer
+## 免责声明
 
 本项目仅供学习和研究目的。不构成投资建议。实盘交易有损失本金的风险。
 
-For educational and research purposes only. Not financial advice. Live trading involves risk of loss.
+For educational and research purposes only. Not financial advice.
 
 ---
 

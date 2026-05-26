@@ -1,188 +1,99 @@
-"""纸上交易核心引擎"""
+"""
+模拟盘核心引擎 — A 股纸上交易
+"""
 
-import os, sys
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import threading
-import datetime
-import time
 import logging
-import requests as _requests
+from typing import Optional
 
-from universe import SYMBOLS, SYMBOL_NAMES, PREFIX_MAP
+from core.data_feed import TencentFeed, DataFeed
+from core.risk import RiskManager
 
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
+
+
+class SimulationBroker:
+    """Simulated broker for paper trading — tracks virtual portfolio."""
+
+    def __init__(self, initial_equity=100_000):
+        self._equity = initial_equity
+        self._positions: dict[str, dict] = {}
+        self._pnl = 0.0
+        self._feed = TencentFeed()
+
+    def net_liquidation(self) -> float:
+        return self._equity
+
+    def daily_pnl(self) -> float:
+        return self._pnl
+
+    def positions(self) -> dict:
+        return self._positions
+
+    def last_price(self, symbol: str) -> float:
+        return self._feed.fetch_realtime([symbol]).get(symbol, 0.0)
+
+    def market_order(self, symbol: str, shares: int, action: str):
+        price = self.last_price(symbol)
+        if price <= 0:
+            return
+        action = action.upper()
+        if action == "BUY":
+            cost = shares * price * 1.0003  # stamp + commission
+            if cost > self._equity * 0.3:
+                return
+            self._equity -= cost
+            self._positions[symbol] = self._positions.get(symbol, {
+                "shares": 0, "avg_cost": price,
+            })
+            pos = self._positions[symbol]
+            old_cost = pos["avg_cost"]
+            old_qty = pos["shares"]
+            pos["shares"] = old_qty + shares
+            if old_qty > 0:
+                pos["avg_cost"] = (old_cost * old_qty + price * shares) / pos["shares"]
+            else:
+                pos["avg_cost"] = price
+        elif action == "SELL" and symbol in self._positions:
+            pos = self._positions[symbol]
+            qty = min(abs(shares), pos["shares"])
+            self._equity += qty * price * 0.9987
+            self._pnl += qty * (price - pos["avg_cost"])
+            pos["shares"] -= qty
+            if pos["shares"] <= 0:
+                del self._positions[symbol]
+        log.info(f"[PAPER] {action} {shares} {symbol} @ {price:.2f}")
 
 
 class PaperTradingEngine:
-    def __init__(self, initial_cash=10000.0):
-        self.initial_cash = initial_cash
-        self.cash = initial_cash
-        self.positions = {}       # {symbol: {shares, avg_cost, stop_loss}}
-        self.trades = []          # [{time, symbol, action, shares, price, amount}]
-        self.latest_prices = {}   # {symbol: price}
-        self.quote_time = None
-        self.lock = threading.RLock()
-        self.running = False
-        self.max_positions = 5
+    """Main paper trading loop — runs strategies against simulated broker."""
 
-    # ── 行情更新（腾讯财经接口，直连，绕过代理）──────────────
-    def update_quotes(self):
-        try:
-            codes = ','.join(f"{PREFIX_MAP[s]}{s}" for s in SYMBOLS)
-            proxies = None
-            if os.environ.get("DISABLE_PROXY", "0") == "1":
-                proxies = {'http': None, 'https': None}
-            r = _requests.get(
-                f'https://qt.gtimg.cn/q={codes}',
-                headers={'Referer': 'https://gu.qq.com'},
-                timeout=8, proxies=proxies,
-            )
-            r.encoding = 'gbk'
-            updated = 0
-            for line in r.text.splitlines():
-                if '~' not in line:
+    def __init__(self, strategy, broker=None, data_feed=None):
+        self.strategy = strategy
+        self.broker = broker or SimulationBroker()
+        self.feed = data_feed or TencentFeed()
+        self.risk = RiskManager(self.broker)
+
+    def run_once(self, symbols: list[str]):
+        for sym in symbols:
+            try:
+                price = self.broker.last_price(sym)
+                if price <= 0:
                     continue
-                parts = line.split('"')[1].split('~') if '"' in line else []
-                if len(parts) < 5:
-                    continue
-                code = parts[2]
-                price = float(parts[3]) if parts[3] else 0.0
-                if code in SYMBOLS and price > 0:
-                    with self.lock:
-                        self.latest_prices[code] = price
-                    updated += 1
-            if updated:
-                self.quote_time = datetime.datetime.now().strftime('%H:%M:%S')
-                logger.info(f"行情更新完成 {self.quote_time} ({updated}只)")
-            else:
-                logger.warning("行情数据为空（非交易时段）")
-        except Exception as e:
-            logger.error(f"行情更新失败: {e}")
-
-    # ── 资产计算 ──────────────────────────────────────────────
-    def total_value(self):
-        with self.lock:
-            val = self.cash
-            for sym, pos in self.positions.items():
-                px = self.latest_prices.get(sym, pos['avg_cost'])
-                val += pos['shares'] * px
-            return round(val, 2)
-
-    def total_pnl(self):
-        return round(self.total_value() - self.initial_cash, 2)
-
-    def daily_pnl(self):
-        return self.total_pnl()  # simplified: same as total since start
-
-    def daily_return_pct(self):
-        if self.initial_cash == 0:
-            return 0
-        return round((self.total_value() - self.initial_cash) / self.initial_cash * 100, 2)
-
-    def unrealized_pnl(self, symbol):
-        with self.lock:
-            if symbol not in self.positions:
-                return 0.0
-            pos = self.positions[symbol]
-            px = self.latest_prices.get(symbol, pos['avg_cost'])
-            return round((px - pos['avg_cost']) * pos['shares'], 2)
-
-    # ── 交易执行 ──────────────────────────────────────────────
-    def buy(self, symbol, amount):
-        """用 amount 元买入 symbol，返回 trade 或 None"""
-        with self.lock:
-            price = self.latest_prices.get(symbol)
-            if not price or price <= 0:
-                return None
-            if amount > self.cash:
-                amount = self.cash
-            lots = int(amount / (price * 100))
-            if lots == 0:
-                return None
-            shares = lots * 100
-            cost = shares * price
-            self.cash -= cost
-
-            if symbol in self.positions:
-                pos = self.positions[symbol]
-                total_s = pos['shares'] + shares
-                pos['avg_cost'] = round((pos['avg_cost'] * pos['shares'] + cost) / total_s, 4)
-                pos['shares'] = total_s
-            else:
-                self.positions[symbol] = {
-                    'shares': shares,
-                    'avg_cost': price,
-                    'stop_loss': round(price * 0.95, 2),
-                }
-
-            trade = {
-                'time': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'symbol': symbol,
-                'name': SYMBOL_NAMES.get(symbol, ''),
-                'action': 'BUY',
-                'shares': shares,
-                'price': price,
-                'amount': round(cost, 2),
-            }
-            self.trades.append(trade)
-            logger.info(f"BUY  {symbol} {shares}股 @{price}  金额{cost:.2f}")
-            return trade
-
-    def sell(self, symbol, shares=None):
-        with self.lock:
-            if symbol not in self.positions:
-                return None
-            pos = self.positions[symbol]
-            price = self.latest_prices.get(symbol, pos['avg_cost'])
-            if shares is None:
-                shares = pos['shares']
-            shares = min(shares, pos['shares'])
-            if shares == 0:
-                return None
-            revenue = shares * price
-            self.cash += revenue
-            pos['shares'] -= shares
-            if pos['shares'] == 0:
-                del self.positions[symbol]
-
-            trade = {
-                'time': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'symbol': symbol,
-                'name': SYMBOL_NAMES.get(symbol, ''),
-                'action': 'SELL',
-                'shares': shares,
-                'price': price,
-                'amount': round(revenue, 2),
-            }
-            self.trades.append(trade)
-            logger.info(f"SELL {symbol} {shares}股 @{price}  金额{revenue:.2f}")
-            return trade
-
-    # ── 状态快照 ──────────────────────────────────────────────
-    def snapshot(self):
-        with self.lock:
-            positions = []
-            for sym, pos in self.positions.items():
-                px = self.latest_prices.get(sym, pos['avg_cost'])
-                pnl = round((px - pos['avg_cost']) * pos['shares'], 2)
-                pnl_pct = round((px - pos['avg_cost']) / pos['avg_cost'] * 100, 2)
-                positions.append({
-                    'symbol': sym,
-                    'name': SYMBOL_NAMES.get(sym, ''),
-                    'shares': pos['shares'],
-                    'avg_cost': pos['avg_cost'],
-                    'price': px,
-                    'pnl': pnl,
-                    'pnl_pct': pnl_pct,
-                    'stop_loss': pos['stop_loss'],
-                })
-            return {
-                'cash': round(self.cash, 2),
-                'total_value': self.total_value(),
-                'pnl': self.total_pnl(),
-                'pnl_pct': self.daily_return_pct(),
-                'positions': positions,
-                'quote_time': self.quote_time or '--',
-                'trade_count': len(self.trades),
-            }
+                data = {"symbol": sym, "close": price}
+                signals = self.strategy.on_bar(data)
+                for sig in signals:
+                    if sig.get("signal") == "buy":
+                        size = self.risk.position_size(price, price * 0.02)
+                        if size > 0 and self.risk.approve(sym, size, price):
+                            self.broker.market_order(sym, size, "BUY")
+                    elif sig.get("signal") == "sell":
+                        pos = self.broker.positions().get(sym, {})
+                        qty = pos.get("shares", 0)
+                        if qty > 0:
+                            self.broker.market_order(sym, qty, "SELL")
+            except Exception as e:
+                log.error(f"[PAPER] {sym}: {e}")

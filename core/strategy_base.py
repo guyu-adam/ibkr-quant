@@ -1,53 +1,33 @@
 """
-统一策略抽象基类
-
-所有策略（动量、港股IPO、时区套利、长期组合、月度轮动、纸上交易）
-应实现此接口，确保 on_bar / on_close / name 签名一致。
-
-使用方式：
-    from core.strategy_base import BaseStrategy
-
-    class MyStrategy(BaseStrategy):
-        @property
-        def name(self) -> str:
-            return "my_strategy"
-
-        def on_bar(self, data: dict) -> list:
-            ...
-
-        def on_close(self) -> None:
-            ...
+策略抽象基类 — 所有策略（合约、期权、杠杆、快速、慢速、长期）的统一接口。
 """
 
 from abc import ABC, abstractmethod
 
 
 class BaseStrategy(ABC):
-    """所有交易策略的抽象基类"""
+    """All trading strategies inherit from this."""
 
     @abstractmethod
     def on_bar(self, data: dict) -> list:
-        """
-        每根 bar 调用一次（或每个评估周期）。
-        返回 [Signal, ...] 列表，无信号返回空列表。
-        """
+        """Called each bar/evaluation cycle. Returns [Signal, ...]."""
         ...
 
     @abstractmethod
     def on_close(self) -> None:
-        """收盘时调用（清仓、风控重置等）"""
+        """Called at market close (cleanup, EOD processing)."""
         ...
 
     @property
     @abstractmethod
     def name(self) -> str:
-        """策略唯一标识名称"""
+        """Unique strategy identifier."""
         ...
 
     def start(self) -> None:
-        """可选：策略启动时的初始化（连接数据源等）"""
+        """Optional: init connections, load state, etc."""
         pass
 
     def stop(self) -> None:
-        """可选：策略停止后的清理（断开连接等）"""
+        """Optional: cleanup, disconnect, save state."""
         pass
