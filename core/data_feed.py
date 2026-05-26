@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 统一数据源抽象层 — 屏蔽 yfinance / IBKR / Tencent / 本地缓存 的差异
 
