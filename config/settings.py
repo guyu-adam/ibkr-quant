@@ -1,19 +1,19 @@
 """
-quant — 多市场量化交易系统配置
+quant — 多市场量化交易系统配置 v3
 """
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # IBKR
 # ═══════════════════════════════════════════════════════════════════════════════
 IBKR_HOST   = "127.0.0.1"
-IBKR_PORT   = 7497      # 7497=TWS live | 7496=TWS paper | 4001=GW live | 4002=GW paper
+IBKR_PORT   = 7497
 IBKR_CLIENT = 1
 PAPER_TRADE = True
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # OKX
 # ═══════════════════════════════════════════════════════════════════════════════
-OKX_FLAG   = "1"        # 1=live, 0=paper
+OKX_FLAG   = "1"
 OKX_DOMAIN = "https://www.okx.com"
 OKX_API_KEY = ""
 OKX_SECRET  = ""
@@ -33,21 +33,72 @@ SCHWAB_SECRET     = ""
 SCHWAB_CALLBACK   = "https://127.0.0.1:8080"
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 同花顺 (Tonghuashun) — A 股行情与交易
+# 同花顺
 # ═══════════════════════════════════════════════════════════════════════════════
 THS_HOST = "127.0.0.1"
 THS_PORT = 8010
 THS_ACCOUNT = ""
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 风控
+# 风控 (v3 — 分层熔断 + 分数凯利)
 # ═══════════════════════════════════════════════════════════════════════════════
 ACCOUNT_EQUITY      = 10_000
 MAX_POSITION_PCT    = 0.10
 MAX_TOTAL_EXPOSURE  = 0.80
 MAX_DAILY_LOSS_PCT  = 0.02
+MAX_WEEKLY_LOSS_PCT = 0.05
+MAX_INTRADAY_LOSS_PCT = 0.015
 STOP_LOSS_ATR_MULT  = 2.0
 TRADE_RISK_PCT      = 0.01
+
+# Kelly sizing
+KELLY_FRACTION      = 0.5       # half-Kelly
+KELLY_MAX_PCT       = 0.02     # cap at 2% per bet
+KELLY_ROLLING_TRADES = 50      # rolling window for win/loss estimation
+KELLY_MIN_TRADES     = 20      # min trades before Kelly kicks in
+
+# Adaptive ATR stops
+ATR_MULT_LOW_VOL   = 1.5       # VIX < 15
+ATR_MULT_MID_VOL   = 2.0       # VIX 15-25
+ATR_MULT_HIGH_VOL  = 3.0       # VIX > 25
+VIX_LOW_THRESHOLD  = 15
+VIX_HIGH_THRESHOLD = 25
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# HMM 市场状态检测
+# ═══════════════════════════════════════════════════════════════════════════════
+HMM_N_STATES      = 3          # trend-up / sideways / trend-down
+HMM_LOOKBACK      = 252        # 1 year training window
+HMM_RETRAIN_FREQ  = 21         # retrain every 21 trading days
+HMM_FEATURES      = ["ret_1d", "ret_5d", "ret_21d", "vol_5d", "vol_21d", "rsi_14"]
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Ensemble 策略融合
+# ═══════════════════════════════════════════════════════════════════════════════
+ENSEMBLE_METHOD     = "weighted"  # equal | weighted | voting
+ENSEMBLE_LOOKBACK   = 60         # days for performance weighting
+ENSEMBLE_MIN_SIGNAL = 0.3        # min blended signal to act
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Meta-Labeling
+# ═══════════════════════════════════════════════════════════════════════════════
+META_LABEL_ENABLED  = True
+META_LABEL_CONFIDENCE = 0.6     # min probability to execute
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Walk-Forward 验证
+# ═══════════════════════════════════════════════════════════════════════════════
+WF_IS_YEARS    = 2
+WF_OOS_MONTHS  = 6
+WF_STEP_MONTHS = 3
+WF_MIN_OOS_SHARPE = 0.3
+WF_MAX_IS_OOS_RATIO = 2.0       # IS Sharpe / OOS Sharpe > 2 → overfit
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Alpha 因子库
+# ═══════════════════════════════════════════════════════════════════════════════
+ALPHA_FACTOR_SET = "full"       # basic | extended | full
+ALPHA_TOP_K       = 20
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 美股 — 快速交易
@@ -62,24 +113,41 @@ ATR_PERIOD      = 14
 SIGNAL_COOLDOWN = 60
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 港股 — 慢速交易（时区套利 + IPO）
+# 合约 — 网格
+# ═══════════════════════════════════════════════════════════════════════════════
+GRID_LEVELS       = 10
+GRID_SPACING_ATR  = 2.0      # grid spacing = ATR * this
+GRID_TREND_FILTER = True     # enable EMA trend filter
+GRID_EMA_PERIOD   = 50       # EMA for trend direction
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 期权 — VIX 择时
+# ═══════════════════════════════════════════════════════════════════════════════
+OPTION_VIX_SELL  = 15        # VIX < this → sell premium
+OPTION_VIX_HEDGE = 25        # VIX > this → buy protection
+OPTION_VIX_HALT  = 35        # VIX > this → stop all option selling
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 杠杆 — 协整配对
+# ═══════════════════════════════════════════════════════════════════════════════
+PAIRS_Z_ENTRY     = 2.0
+PAIRS_Z_EXIT      = 0.5
+PAIRS_HALFLIFE_MIN = 5
+PAIRS_HALFLIFE_MAX = 60
+PAIRS_CORR_MIN    = 0.7
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 港股 — 慢速交易
 # ═══════════════════════════════════════════════════════════════════════════════
 TZ_ARB = {
-    "adr_threshold":     0.015,
-    "position_risk_pct": 0.01,
-    "stop_pct":          0.02,
-    "target_ratio":      2.0,
-    "max_positions":     3,
-    "allow_short":       False,
-    "hkd_usd_rate":      7.8,
+    "adr_threshold": 0.015, "position_risk_pct": 0.01,
+    "stop_pct": 0.02, "target_ratio": 2.0,
+    "max_positions": 3, "allow_short": False, "hkd_usd_rate": 7.8,
 }
-
 HK_IPO = {
-    "min_grey_premium":          0.15,
-    "stop_pct":                  0.05,
-    "target_pct_of_premium":     0.60,
-    "max_risk_per_trade":        0.015,
-    "max_concurrent_positions":  2,
+    "min_grey_premium": 0.15, "stop_pct": 0.05,
+    "target_pct_of_premium": 0.60, "max_risk_per_trade": 0.015,
+    "max_concurrent_positions": 2,
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -87,15 +155,30 @@ HK_IPO = {
 # ═══════════════════════════════════════════════════════════════════════════════
 LONG_TERM_PORTFOLIO = {
     "positions": {
-        "QQQ":  0.25, "SPY":  0.20, "NVDA": 0.15,
+        "QQQ": 0.25, "SPY": 0.20, "NVDA": 0.15,
         "AAPL": 0.10, "MSFT": 0.10, "AMZN": 0.10,
         "TSLA": 0.05, "META": 0.05,
     },
-    "drift_threshold":   0.05,
-    "dca_dip_pct":       0.15,
-    "trailing_stop_pct": 0.25,
-    "max_equity_pct":    0.60,
+    "drift_threshold": 0.05, "dca_dip_pct": 0.15,
+    "trailing_stop_pct": 0.25, "max_equity_pct": 0.60,
+    # HRP
+    "use_hrp": True,
+    "hrp_method": "ward",        # ward | single | complete | average
+    "cov_shrinkage": "ledoit_wolf",  # ledoit_wolf | oas | sample
+    # Bootstrap
+    "bootstrap_samples": 1000,
+    "bootstrap_confidence": 0.05,  # 5th percentile worst-case
 }
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Transformer (P2)
+# ═══════════════════════════════════════════════════════════════════════════════
+TRANSFORMER_ENABLED  = False
+TRANSFORMER_D_MODEL  = 128
+TRANSFORMER_N_HEADS  = 4
+TRANSFORMER_N_LAYERS = 3
+TRANSFORMER_SEQ_LEN  = 60
+TRANSFORMER_HORIZON  = 5
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 运行时
@@ -103,7 +186,6 @@ LONG_TERM_PORTFOLIO = {
 MARKET_OPEN  = "09:30"
 MARKET_CLOSE = "15:45"
 BAR_SIZE     = "5 mins"
-
 HK_MARKET_OPEN  = "09:30"
 HK_MARKET_CLOSE = "16:00"
 HK_PRE_OPEN     = "08:50"

@@ -1,149 +1,255 @@
 """
-Alpha 因子库 — 多维度标准化因子计算
+Alpha 因子库 v2 — Alpha158 风格多维度因子计算
 
-因子分类（参考 qlib Alpha158 + WorldQuant 101）:
-  - 动量类: 1/3/6/12月收益率、RSI、MACD
-  - 波动类: 历史波动率、ATR比率、偏度、峰度
-  - 换手类: 换手率变化、成交量比率
-  - 质量类: 毛利率、ROE（需基本面数据，暂用代理）
-  - 价值类: PE/PB代理（价格/均线偏离）
-  - 技术类: 布林带、EMA交叉、OBV
+Factor categories:
+  - Momentum: 1/3/6/12m returns, RSI, MACD, TRIX, KDJ
+  - Volatility: realized vol, ATR ratio, skewness, kurtosis
+  - Volume: volume ratio, OBV, VWAP deviation, turnover proxy
+  - Technical: Bollinger Bands, EMA cross, Parabolic SAR, ADX
+  - Value proxy: price/MA deviation, high-low range ratio
+  - Quality proxy: Sharpe ratio, max drawdown, recovery factor
 
-每个因子输出时进行截面标准化（z-score cross-sectional）。
+Each factor is cross-sectionally z-scored.
 """
 
 import numpy as np
 import pandas as pd
-from typing import Optional
 
 
 def _zscore(series: pd.Series) -> pd.Series:
-    """截面标准化（去均值/标准差）"""
-    mu, std = series.mean(), series.std()
-    if std == 0 or pd.isna(std):
-        return pd.Series(0.0, index=series.index)
-    return (series - mu) / std
+    s = series.astype(float)
+    mu, std = s.mean(), s.std()
+    if std is None or (isinstance(std, (int, float)) and std == 0) or (hasattr(std, '__len__') and std <= 0):
+        return s * 0.0
+    std_val = float(std) if isinstance(std, (int, float, np.floating)) else std
+    if std_val <= 0:
+        return s * 0.0
+    return (s - mu) / std_val
 
 
 def compute_factors(df: pd.DataFrame) -> pd.DataFrame:
     """
-    输入: df with columns [open, high, low, close, volume]
-    输出: DataFrame of standardized alpha factors
+    Compute all alpha factors from OHLCV data.
+
+    Args:
+        df: DataFrame with columns [open, high, low, close, volume]
+            Index must be datetime.
+
+    Returns:
+        DataFrame with factor columns, same index as input.
     """
-    close  = df['close'].astype(float)
-    high   = df['high'].astype(float)
-    low    = df['low'].astype(float)
-    volume = df['volume'].astype(float)
+    close  = df["close"].astype(float)
+    high   = df["high"].astype(float)
+    low    = df["low"].astype(float)
+    volume = df["volume"].astype(float)
     returns = close.pct_change()
 
     factors = pd.DataFrame(index=df.index)
 
-    # ═══════════════════ 动量类 ═══════════════════
-    for p in [5, 10, 21, 42, 63]:  # 1w/2w/1m/2m/3m
-        factors[f'mom_{p}d'] = close.pct_change(p)
+    # ── Momentum (12 factors) ─────────────────────────────────────────
+    factors["ret_1d"]   = returns
+    factors["ret_5d"]   = close.pct_change(5)
+    factors["ret_21d"]  = close.pct_change(21)
+    factors["ret_63d"]  = close.pct_change(63)
+    factors["ret_126d"] = close.pct_change(126)
+    factors["ret_252d"] = close.pct_change(252)
+    factors["rsi_14"]   = _rsi(close, 14)
+    factors["rsi_28"]   = _rsi(close, 28)
+    factors["macd_hist"] = _macd_hist(close)
+    factors["trix_14"]  = _trix(close, 14)
+    factors["kdj_k"]    = _kdj(high, low, close)[0]
+    factors["kdj_d"]    = _kdj(high, low, close)[1]
 
-    # RSI
-    delta = close.diff()
-    gain = delta.clip(lower=0).rolling(14).mean()
-    loss = (-delta.clip(upper=0)).rolling(14).mean()
-    rs = gain / loss.replace(0, np.nan)
-    factors['rsi_14'] = 100.0 - 100.0 / (1.0 + rs)
+    # ── Volatility (8 factors) ────────────────────────────────────────
+    factors["vol_5d"]   = returns.rolling(5).std()
+    factors["vol_21d"]  = returns.rolling(21).std()
+    factors["vol_63d"]  = returns.rolling(63).std()
+    factors["atr_14"]   = _atr(high, low, close, 14) / close
+    factors["skew_21d"] = returns.rolling(21).skew()
+    factors["kurt_21d"] = returns.rolling(21).kurt()
+    factors["hl_ratio"] = (high - low) / close
+    factors["max_dd_63d"] = close.rolling(63).apply(_max_drawdown, raw=False)
 
-    # MACD
-    ema12 = close.ewm(span=12, adjust=False).mean()
-    ema26 = close.ewm(span=26, adjust=False).mean()
-    factors['macd'] = ema12 - ema26
-    factors['macd_signal'] = factors['macd'].ewm(span=9, adjust=False).mean()
-    factors['macd_hist'] = factors['macd'] - factors['macd_signal']
+    # ── Volume (6 factors) ────────────────────────────────────────────
+    factors["vol_ratio_5d"]  = volume / volume.rolling(5).mean()
+    factors["vol_ratio_21d"] = volume / volume.rolling(21).mean()
+    factors["obv_change_5d"] = _obv(close, volume).pct_change(5)
+    factors["vwap_deviation"] = (close - _vwap(high, low, close, volume)) / close
+    factors["turnover_5d"] = volume.rolling(5).mean()  # proxy
+    factors["dollar_vol_5d"] = (close * volume).rolling(5).mean()
 
-    # ═══════════════════ 波动类 ═══════════════════
-    factors['vol_5d']  = returns.rolling(5).std()
-    factors['vol_21d'] = returns.rolling(21).std()
-    factors['vol_42d'] = returns.rolling(42).std()
-    factors['vol_ratio'] = factors['vol_5d'] / factors['vol_21d'].replace(0, np.nan)  # 短期/长期波动比
+    # ── Technical (10 factors) ────────────────────────────────────────
+    factors["bb_width"]   = _bollinger_width(close)
+    factors["bb_position"] = _bollinger_position(close)
+    factors["ema_10_30"]  = _ema_ratio(close, 10, 30)
+    factors["ema_20_60"]  = _ema_ratio(close, 20, 60)
+    factors["ma_5_20"]    = _sma_ratio(close, 5, 20)
+    factors["adx_14"]     = _adx(high, low, close, 14)
+    factors["psar_diff"]  = _psar(high, low, close)
+    factors["willr_14"]   = _williams_r(high, low, close, 14)
+    factors["cci_14"]     = _cci(high, low, close, 14)
+    factors["roc_10"]     = close.pct_change(10)
 
-    # ATR
-    tr = pd.concat([
-        high - low,
-        (high - close.shift()).abs(),
-        (low - close.shift()).abs(),
-    ], axis=1).max(axis=1)
-    factors['atr_14'] = tr.rolling(14).mean() / close  # ATR 比率
+    # ── Value / Quality proxies (6 factors) ──────────────────────────
+    factors["price_to_ma50"]  = close / close.rolling(50).mean() - 1
+    factors["price_to_ma200"] = close / close.rolling(200).mean() - 1
+    factors["sharpe_21d"] = returns.rolling(21).mean() / (returns.rolling(21).std() + 1e-8)
+    factors["sharpe_63d"] = returns.rolling(63).mean() / (returns.rolling(63).std() + 1e-8)
+    factors["sortino_63d"] = _sortino(returns, 63)
+    factors["calmar_63d"]  = close.rolling(63).apply(
+        lambda x: (x.iloc[-1] / x.iloc[0] - 1) / (_max_drawdown(x) + 0.01), raw=False)
 
-    # 偏度/峰度
-    factors['skew_21d']  = returns.rolling(21).skew()
-    factors['kurt_21d']  = returns.rolling(21).kurt()
-
-    # Max drawdown (21d)
-    peak_21 = close.rolling(21).max()
-    factors['mdd_21d'] = (close - peak_21) / peak_21
-
-    # ═══════════════════ 换手/流动性类 ═══════════════════
-    factors['vol_5d_ma']  = volume.rolling(5).mean()
-    factors['vol_21d_ma'] = volume.rolling(21).mean()
-    factors['vol_ratio_v'] = factors['vol_5d_ma'] / factors['vol_21d_ma'].replace(0, np.nan)
-    factors['vol_chg'] = volume.pct_change(5)
-
-    # Amihud 非流动性（收益率绝对值/成交量）
-    factors['illiquidity'] = returns.abs() / (volume.replace(0, np.nan) * close)
-
-    # ═══════════════════ 价值代理类 ═══════════════════
-    # 价格/均线偏离（代理 PE/PB 估值偏离）
-    for p in [21, 63]:
-        ma = close.rolling(p).mean()
-        factors[f'price_ma{p}_dev'] = (close - ma) / ma
-
-    # ═══════════════════ 技术类 ═══════════════════
-    # 布林带
-    bb_mid = close.rolling(20).mean()
-    bb_std = close.rolling(20).std()
-    factors['bb_width'] = (bb_std * 2) / bb_mid
-    factors['bb_position'] = (close - bb_mid) / (bb_std * 2)
-
-    # EMA 交叉信号
-    ema10 = close.ewm(span=10, adjust=False).mean()
-    ema30 = close.ewm(span=30, adjust=False).mean()
-    factors['ema_cross'] = (ema10 - ema30) / close
-
-    # OBV 变化率
-    obv = (np.sign(close.diff()) * volume).cumsum()
-    factors['obv_chg'] = obv.pct_change(5)
-
-    # 威廉 %R
-    high_14, low_14 = high.rolling(14).max(), low.rolling(14).min()
-    factors['williams_r'] = (high_14 - close) / (high_14 - low_14).replace(0, np.nan) * -100
-
-    # ═══════════════════ 截面标准化 ═══════════════════
+    # Cross-sectional z-score: skip cols that are all-NA
     for col in factors.columns:
-        factors[col] = factors[col].astype(float)
+        zcol = factors[col]
+        if not zcol.isna().all():
+            factors[col + "_z"] = _zscore(zcol)
 
     return factors
 
 
 def compute_forward_returns(close: pd.Series, horizon: int = 5) -> pd.Series:
-    """
-    计算未来 N 日收益率（预测目标）
-    horizon=5 表示预测未来 5 日收益
-    """
-    future = close.shift(-horizon)
-    return (future - close) / close
+    """Compute forward returns for ML label."""
+    return close.shift(-horizon) / close - 1
 
 
-def prepare_ml_data(df: pd.DataFrame, horizon: int = 5) -> tuple:
-    """
-    准备机器学习数据
+# ════════════════ Indicator implementations ═══════════════════════════════════
 
-    Returns:
-        X: 因子矩阵 (n_samples, n_factors)
-        y: 未来收益标签
-        dates: 日期索引
-    """
-    factors = compute_factors(df)
-    forward = compute_forward_returns(df['close'], horizon)
+def _rsi(close, period):
+    delta = close.diff()
+    gain = delta.clip(lower=0).ewm(span=period, adjust=False).mean()
+    loss = (-delta).clip(lower=0).ewm(span=period, adjust=False).mean()
+    rs = gain / loss.replace(0, np.nan)
+    return 100.0 - 100.0 / (1.0 + rs)
 
-    # 对齐并去 NaN
-    common_idx = factors.dropna().index.intersection(forward.dropna().index)
-    X = factors.loc[common_idx].fillna(0.0)
-    y = forward.loc[common_idx]
 
-    return X, y, common_idx
+def _macd_hist(close, fast=12, slow=26, signal=9):
+    ef = close.ewm(span=fast, adjust=False).mean()
+    es = close.ewm(span=slow, adjust=False).mean()
+    line = ef - es
+    sig = line.ewm(span=signal, adjust=False).mean()
+    return (line - sig) / close
+
+
+def _trix(close, period):
+    ema1 = close.ewm(span=period, adjust=False).mean()
+    ema2 = ema1.ewm(span=period, adjust=False).mean()
+    ema3 = ema2.ewm(span=period, adjust=False).mean()
+    return ema3.pct_change()
+
+
+def _kdj(high, low, close, n=9, m1=3, m2=3):
+    low_n, high_n = low.rolling(n).min(), high.rolling(n).max()
+    rsv = (close - low_n) / (high_n - low_n + 1e-8) * 100
+    k = rsv.ewm(span=m1, adjust=False).mean()
+    d = k.ewm(span=m2, adjust=False).mean()
+    return k, d
+
+
+def _atr(high, low, close, period):
+    prev = close.shift(1)
+    tr = pd.concat([high - low, (high - prev).abs(), (low - prev).abs()], axis=1).max(axis=1)
+    return tr.ewm(span=period, adjust=False).mean()
+
+
+def _max_drawdown(close_series):
+    peak = close_series.expanding().max()
+    dd = (close_series - peak) / peak
+    return abs(dd.min()) if len(dd) > 0 else 0.0
+
+
+def _obv(close, volume):
+    direction = np.sign(close.diff().fillna(0))
+    return (direction * volume).cumsum()
+
+
+def _vwap(high, low, close, volume):
+    typical = (high + low + close) / 3
+    return (typical * volume).cumsum() / volume.cumsum()
+
+
+def _bollinger_width(close, period=20, std=2):
+    ma = close.rolling(period).mean()
+    std_dev = close.rolling(period).std()
+    return (std_dev * std) / ma
+
+
+def _bollinger_position(close, period=20, std=2):
+    ma = close.rolling(period).mean()
+    std_dev = close.rolling(period).std()
+    return (close - ma) / (std_dev * std + 1e-8)
+
+
+def _ema_ratio(close, fast, slow):
+    ef = close.ewm(span=fast, adjust=False).mean()
+    es = close.ewm(span=slow, adjust=False).mean()
+    return ef / es - 1
+
+
+def _sma_ratio(close, fast, slow):
+    return close.rolling(fast).mean() / close.rolling(slow).mean() - 1
+
+
+def _adx(high, low, close, period):
+    tr = _atr(high, low, close, period)
+    up = high.diff()
+    down = -low.diff()
+    plus_dm = up.where((up > down) & (up > 0), 0.0)
+    minus_dm = down.where((down > up) & (down > 0), 0.0)
+    plus_di = 100 * plus_dm.ewm(span=period, adjust=False).mean() / (tr + 1e-8)
+    minus_di = 100 * minus_dm.ewm(span=period, adjust=False).mean() / (tr + 1e-8)
+    dx = (abs(plus_di - minus_di) / (plus_di + minus_di + 1e-8)) * 100
+    return dx.ewm(span=period, adjust=False).mean()
+
+
+def _psar(high, low, close, af_step=0.02, af_max=0.2):
+    psar = pd.Series(np.nan, index=close.index)
+    trend = True  # True=uptrend
+    ep = float(high.iloc[0])
+    af = af_step
+    psar.iloc[0] = float(low.iloc[0])
+    for i in range(1, len(close)):
+        prev = psar.iloc[i-1]
+        psar.iloc[i] = prev + af * (ep - prev)
+        if trend:
+            if low.iloc[i] < psar.iloc[i]:
+                trend = False
+                psar.iloc[i] = ep
+                ep = float(low.iloc[i])
+                af = af_step
+            else:
+                if high.iloc[i] > ep:
+                    ep = float(high.iloc[i])
+                    af = min(af + af_step, af_max)
+                psar.iloc[i] = min(psar.iloc[i], low.iloc[i-1]) if i > 1 else psar.iloc[i]
+        else:
+            if high.iloc[i] > psar.iloc[i]:
+                trend = True
+                psar.iloc[i] = ep
+                ep = float(high.iloc[i])
+                af = af_step
+            else:
+                if low.iloc[i] < ep:
+                    ep = float(low.iloc[i])
+                    af = min(af + af_step, af_max)
+                psar.iloc[i] = max(psar.iloc[i], high.iloc[i-1]) if i > 1 else psar.iloc[i]
+    return (close - psar) / close
+
+
+def _williams_r(high, low, close, period):
+    hh = high.rolling(period).max()
+    ll = low.rolling(period).min()
+    return (hh - close) / (hh - ll + 1e-8) * -100
+
+
+def _cci(high, low, close, period):
+    tp = (high + low + close) / 3
+    ma = tp.rolling(period).mean()
+    mad = tp.rolling(period).apply(lambda x: np.abs(x - x.mean()).mean())
+    return (tp - ma) / (0.015 * mad + 1e-8)
+
+
+def _sortino(returns, period):
+    downside = returns.clip(upper=0)
+    downside_std = downside.rolling(period).std()
+    return returns.rolling(period).mean() / (downside_std + 1e-8)

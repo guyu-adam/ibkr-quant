@@ -1,33 +1,41 @@
 """
-合约策略 — OKX 永续合约网格 + Binance 合约。
+合约策略 v2 — 动态网格间距(ATR-based) + EMA 趋势过滤 + 状态持久化。
+
+Enhancements (P0):
+  - ATR-based dynamic grid spacing (high vol → wider grid)
+  - EMA(50) trend filter: only long grid above EMA, short grid below
+  - JSON state persistence for crash recovery
 """
 
+import json
+import os
 import logging
-import pandas as pd
 import numpy as np
 
 from core.strategy_base import BaseStrategy
+from config.settings import (
+    GRID_LEVELS, GRID_SPACING_ATR, GRID_TREND_FILTER, GRID_EMA_PERIOD,
+)
 
 log = logging.getLogger(__name__)
 
+STATE_FILE = "grid_state.json"
+
 
 class GridScalpStrategy(BaseStrategy):
-    """
-    永续合约网格震荡策略
-
-    Configured for OKX perpetual swaps. Uses grid of buy/sell orders
-    at fixed intervals around a mid-price. Re-enters positions on pullbacks.
-    """
+    """永续合约网格震荡策略 v2 — 动态间距 + 趋势过滤."""
 
     def __init__(self, config: dict | None = None):
         cfg = config or {}
-        self.grid_levels    = cfg.get("grid_levels", 10)
-        self.grid_spacing   = cfg.get("grid_spacing", 0.005)   # 0.5%
-        self.position_pct   = cfg.get("position_pct", 0.05)    # 5% per grid level
-        self.stop_loss_pct  = cfg.get("stop_loss_pct", 0.03)
-        self.take_profit_pct = cfg.get("take_profit_pct", 0.02)
-        self._mid_price     = 0.0
-        self._orders: dict[str, dict] = {}
+        self.grid_levels     = cfg.get("grid_levels", GRID_LEVELS)
+        self.spacing_atr     = cfg.get("grid_spacing_atr", GRID_SPACING_ATR)
+        self.trend_filter    = cfg.get("trend_filter", GRID_TREND_FILTER)
+        self.ema_period      = cfg.get("ema_period", GRID_EMA_PERIOD)
+        self.position_pct    = cfg.get("position_pct", 0.05)
+        self._mid_price      = 0.0
+        self._orders: dict[float, dict] = {}  # price → {side, size}
+        self._price_history: list[float] = []
+        self._load_state()
 
     @property
     def name(self) -> str:
@@ -38,45 +46,92 @@ class GridScalpStrategy(BaseStrategy):
         if price <= 0:
             return []
 
-        if self._mid_price == 0:
-            self._mid_price = price
-            self._build_grid(price)
+        self._price_history.append(price)
+        if len(self._price_history) > 200:
+            self._price_history = self._price_history[-200:]
 
         signals = []
 
-        # Check if price moved enough to trigger grid rebal
-        drift = abs(price - self._mid_price) / self._mid_price
-        if drift > self.grid_spacing * 2:
-            self._mid_price = price
-            self._build_grid(price)
+        # Trend filter: determine allowed direction
+        trend_allowed = "both"
+        if self.trend_filter and len(self._price_history) >= self.ema_period:
+            ema = self._ema(self._price_history, self.ema_period)
+            if price > ema:
+                trend_allowed = "long"   # only build long-side grid
+            else:
+                trend_allowed = "short"  # only build short-side grid
 
-        # Check grid level fills
-        for level_price, order in list(self._orders.items()):
+        # Initialize or re-center grid
+        atr_val = self._calc_atr()
+        dynamic_spacing = (atr_val / price) * self.spacing_atr if atr_val > 0 else 0.005
+
+        if self._mid_price == 0 or abs(price - self._mid_price) / self._mid_price > dynamic_spacing * 3:
+            self._mid_price = price
+            self._build_grid(price, dynamic_spacing, trend_allowed)
+
+        # Check grid fills
+        for level_price in sorted(self._orders.keys()):
+            order = self._orders[level_price]
             if order["side"] == "BUY" and price <= level_price:
-                signals.append({
-                    "signal": "buy", "price": price,
-                    "size": order["size"], "reason": f"grid_buy @ {level_price:.4f}",
-                })
+                signals.append({"signal": "buy", "price": price, "size": order["size"],
+                               "reason": f"grid_buy @ {level_price:.4f}"})
                 del self._orders[level_price]
             elif order["side"] == "SELL" and price >= level_price:
-                signals.append({
-                    "signal": "sell", "price": price,
-                    "size": order["size"], "reason": f"grid_sell @ {level_price:.4f}",
-                })
+                signals.append({"signal": "sell", "price": price, "size": order["size"],
+                               "reason": f"grid_sell @ {level_price:.4f}"})
                 del self._orders[level_price]
 
+        self._save_state()
         return signals
 
     def on_close(self) -> None:
         self._orders.clear()
+        if os.path.exists(STATE_FILE):
+            os.remove(STATE_FILE)
 
-    def _build_grid(self, mid: float):
+    def _build_grid(self, mid: float, spacing: float, trend: str):
         self._orders.clear()
         for i in range(1, self.grid_levels + 1):
-            offset = self.grid_spacing * i
-            self._orders[round(mid * (1 - offset), 4)] = {
-                "side": "BUY", "size": self.position_pct,
-            }
-            self._orders[round(mid * (1 + offset), 4)] = {
-                "side": "SELL", "size": self.position_pct,
-            }
+            offset = spacing * i
+            if trend in ("both", "long"):
+                self._orders[round(mid * (1 - offset), 4)] = {
+                    "side": "BUY", "size": self.position_pct}
+            if trend in ("both", "short"):
+                self._orders[round(mid * (1 + offset), 4)] = {
+                    "side": "SELL", "size": self.position_pct}
+
+    def _calc_atr(self) -> float:
+        if len(self._price_history) < 15:
+            return 0.0
+        prices = np.array(self._price_history[-15:])
+        diffs = np.abs(np.diff(prices))
+        return float(np.mean(diffs))
+
+    @staticmethod
+    def _ema(data: list, period: int) -> float:
+        if len(data) < period:
+            return data[-1]
+        alpha = 2 / (period + 1)
+        ema = data[0]
+        for x in data[1:]:
+            ema = alpha * x + (1 - alpha) * ema
+        return ema
+
+    def _save_state(self):
+        try:
+            state = {"mid_price": self._mid_price, "orders": self._orders}
+            with open(STATE_FILE, "w") as f:
+                json.dump(state, f, default=str)
+        except Exception:
+            pass
+
+    def _load_state(self):
+        try:
+            if os.path.exists(STATE_FILE):
+                with open(STATE_FILE) as f:
+                    state = json.load(f)
+                self._mid_price = state.get("mid_price", 0.0)
+                self._orders = {float(k): v for k, v in state.get("orders", {}).items()}
+                log.info(f"Loaded grid state: mid={self._mid_price}, {len(self._orders)} orders")
+        except Exception:
+            pass

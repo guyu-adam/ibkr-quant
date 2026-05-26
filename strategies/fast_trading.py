@@ -1,12 +1,12 @@
 """
-快速交易 — 美股日内动量（RSI 均值回归 + MACD + EMA 趋势过滤）
+快速交易 v2 — RSI 均值回归 + HMM 状态过滤 + 自适应止损。
 
-5 分钟 K 线交易，目标标的：SPY, QQQ, NVDA, AAPL, MSFT, TSLA, AMZN 等。
+Enhancements (P0):
+  - HMM regime detection: only activate mean-reversion in sideways markets
+  - Adaptive ATR stop based on VIX regime
+  - Signal cooldown per symbol
 
-Usage:
-    from strategies.fast_trading import MeanReversionStrategy, PositionSizer
-    strategy = MeanReversionStrategy(config)
-    result = strategy.evaluate(feed, "SPY", positions)
+Kept: original RSI + MACD + volume logic from v1.
 """
 
 import logging
@@ -15,19 +15,23 @@ import numpy as np
 
 from core.strategy_base import BaseStrategy
 from core.data_feed import DataFeed
+from core.regime_detector import RegimeDetector
+from config.settings import (
+    SIGNAL_COOLDOWN, ATR_PERIOD, ATR_MULT_LOW_VOL, ATR_MULT_MID_VOL, ATR_MULT_HIGH_VOL,
+)
 
 log = logging.getLogger(__name__)
 
 
 class MeanReversionStrategy(BaseStrategy):
-    """RSI 超卖反弹 + MACD 底背离确认 + 成交量验证"""
+    """RSI 均值回归 v2 — HMM 过滤 + 自适应止损."""
 
     def __init__(self, config: dict | None = None):
         cfg = config or {}
         self.rsi_period      = cfg.get('rsi_period', 14)
         self.rsi_oversold    = cfg.get('rsi_oversold', 30)
         self.rsi_overbought  = cfg.get('rsi_overbought', 70)
-        self.atr_period      = cfg.get('atr_period', 14)
+        self.atr_period      = cfg.get('atr_period', ATR_PERIOD)
         self.atr_stop_mult   = cfg.get('atr_stop_mult', 2.0)
         self.macd_fast       = cfg.get('macd_fast', 12)
         self.macd_slow       = cfg.get('macd_slow', 26)
@@ -37,11 +41,17 @@ class MeanReversionStrategy(BaseStrategy):
         self.min_score       = cfg.get('min_score', 30)
         self.take_profit_pct = cfg.get('take_profit_pct', 0.05)
         self.hard_stop_pct   = cfg.get('hard_stop_pct', 0.03)
+        self.cooldown_sec    = cfg.get('cooldown', SIGNAL_COOLDOWN)
         self._stops: dict[str, float] = {}
+        self._last_signal: dict[str, float] = {}
+        self._regime = RegimeDetector()
+        self._vix = 20.0
 
     @property
     def name(self) -> str:
         return "mean_reversion"
+
+    def set_vix(self, vix: float): self._vix = vix
 
     def on_bar(self, data: dict) -> list:
         raise NotImplementedError("use evaluate() directly")
@@ -49,24 +59,28 @@ class MeanReversionStrategy(BaseStrategy):
     def on_close(self) -> None:
         self._stops.clear()
 
-    # ── Indicators ─────────────────────────────────────────────────────────
+    # ── Adaptive ATR ──────────────────────────────────────────────────────
+    def _get_atr_mult(self) -> float:
+        if self._vix <= 15: return ATR_MULT_LOW_VOL
+        elif self._vix >= 25: return ATR_MULT_HIGH_VOL
+        return ATR_MULT_MID_VOL
+
+    # ── Indicators (unchanged from v1) ────────────────────────────────────
     @staticmethod
-    def _rsi(close: pd.Series, period: int) -> pd.Series:
+    def _rsi(close, period):
         delta = close.diff()
-        gain, loss = delta.clip(lower=0), (-delta).clip(lower=0)
-        avg_g = gain.ewm(span=period, adjust=False).mean()
-        avg_l = loss.ewm(span=period, adjust=False).mean()
-        rs = avg_g / avg_l.replace(0, np.nan)
+        gain = delta.clip(lower=0).ewm(span=period, adjust=False).mean()
+        loss = (-delta).clip(lower=0).ewm(span=period, adjust=False).mean()
+        rs = gain / loss.replace(0, np.nan)
         vals = 100.0 - 100.0 / (1.0 + rs)
-        vals[avg_l == 0] = 100.0
+        vals[loss == 0] = 100.0
         vals.iloc[:period] = np.nan
         return vals
 
     @staticmethod
     def _atr(high, low, close, period):
         prev = close.shift(1)
-        tr = pd.concat([high - low, (high - prev).abs(), (low - prev).abs()],
-                       axis=1).max(axis=1)
+        tr = pd.concat([high - low, (high - prev).abs(), (low - prev).abs()], axis=1).max(axis=1)
         return tr.ewm(span=period, adjust=False).mean()
 
     @staticmethod
@@ -77,19 +91,33 @@ class MeanReversionStrategy(BaseStrategy):
         sig = line.ewm(span=signal, adjust=False).mean()
         return pd.DataFrame({"line": line, "signal": sig, "histogram": line - sig})
 
-    # ── Core signal ────────────────────────────────────────────────────────
+    # ── Core evaluate (with HMM filter) ───────────────────────────────────
     def evaluate(self, feed: DataFeed, symbol: str,
                  positions: dict | None = None) -> dict:
         df = feed.fetch_history(symbol)
         result = {'signal': 'hold', 'score': 0.0, 'rsi': 0.0,
-                  'atr': 0.0, 'close': 0.0, 'reason': ''}
+                  'atr': 0.0, 'close': 0.0, 'reason': '', 'regime': self._regime._last_regime}
 
         if df is None or len(df) < 30:
             result['reason'] = 'insufficient data'
             return result
 
+        # Update regime
+        regime = self._regime.fit_predict(df)
+        result['regime'] = regime
+
+        # Cooldown check
+        import time as _time
+        now = _time.time()
+        last = self._last_signal.get(symbol, 0)
+        if now - last < self.cooldown_sec:
+            result['reason'] = 'cooldown'
+            return result
+
         close = df['close'].astype(float)
-        high, low, vol = df['high'].astype(float), df['low'].astype(float), df['volume'].astype(float)
+        high  = df['high'].astype(float)
+        low   = df['low'].astype(float)
+        vol   = df['volume'].astype(float)
 
         rsi_vals = self._rsi(close, self.rsi_period)
         atr_vals = self._atr(high, low, close, self.atr_period)
@@ -119,8 +147,8 @@ class MeanReversionStrategy(BaseStrategy):
         # ── SELL ──────────────────────────────────────────────────────────
         if pos:
             cost = pos.get('avg_cost', cur_close)
+            atr_mult = self._get_atr_mult()
             stop = pos.get('stop_loss', cost * (1 - self.hard_stop_pct))
-            gain_pct = (cur_close - cost) / cost if cost > 0 else 0
 
             if cur_rsi > self.rsi_overbought:
                 result['signal'] = 'sell'
@@ -128,52 +156,52 @@ class MeanReversionStrategy(BaseStrategy):
                 return result
             if cur_close <= stop:
                 result['signal'] = 'sell'
-                result['reason'] = f'stop loss: {cur_close:.2f} <= {stop:.2f}'
+                result['reason'] = f'stop: {cur_close:.2f} <= {stop:.2f}'
                 return result
             if macd_line < sig_line and cur_rsi < 50 and cur_hist < prev_hist:
                 result['signal'] = 'sell'
                 result['reason'] = 'MACD death cross'
                 return result
-            if gain_pct > self.take_profit_pct and cur_rsi < 55:
+            if (cur_close - cost) / cost > self.take_profit_pct and cur_rsi < 55:
                 result['signal'] = 'sell'
-                result['reason'] = f'take profit: +{gain_pct:.1%}'
+                result['reason'] = f'take profit'
                 return result
-            result['new_stop'] = max(
-                cur_close - self.atr_stop_mult * cur_atr, cost * (1 - self.hard_stop_pct))
+            result['new_stop'] = max(cur_close - atr_mult * cur_atr,
+                                     cost * (1 - self.hard_stop_pct))
             return result
 
-        # ── BUY ───────────────────────────────────────────────────────────
+        # ── HMM filter: only buy in sideways or uptrend ──────────────────
+        if regime == 2:  # trend-down
+            result['reason'] = f'HMM regime=down (skip buy)'
+            return result
+
+        # ── BUY scoring ──────────────────────────────────────────────────
         ema30 = close.ewm(span=30, adjust=False).mean().iloc[-1]
         if cur_close < ema30:
-            result['reason'] = f'price {cur_close:.2f} < EMA30 {ema30:.2f}'
+            result['reason'] = f'price < EMA30'
             return result
 
         score = 0.0
         if cur_rsi < self.rsi_oversold:
             score += min(50, (self.rsi_oversold - cur_rsi) * 3)
-        if cur_hist > prev_hist > prev2_hist:
-            score += 15
-        if cur_hist > 0:
-            score += 10
-        if macd_line > sig_line:
-            score += 5
-        if vol_ratio > 1.5:
-            score += 10
-        elif vol_ratio > self.vol_spike_ratio:
-            score += 5
+        if cur_hist > prev_hist > prev2_hist: score += 15
+        if cur_hist > 0: score += 10
+        if macd_line > sig_line: score += 5
+        if vol_ratio > 1.5: score += 10
+        elif vol_ratio > self.vol_spike_ratio: score += 5
 
         result['score'] = round(score, 1)
         if score >= self.min_score:
             result['signal'] = 'buy'
-            result['reason'] = (f'RSI={cur_rsi:.1f} hist={cur_hist:.4f} '
-                               f'vol_ratio={vol_ratio:.1f} score={score:.1f}')
+            result['reason'] = (f'RSI={cur_rsi:.1f} score={score:.1f} regime={regime}')
+            self._last_signal[symbol] = now
         else:
             result['reason'] = f'score={score:.1f} < {self.min_score}'
         return result
 
 
 class PositionSizer:
-    """波动率自适应仓位计算"""
+    """波动率自适应仓位 (unchanged)."""
 
     def __init__(self, base_pct=0.08, max_pct=0.15, max_positions=8):
         self.base_pct = base_pct
@@ -184,12 +212,9 @@ class PositionSizer:
         if price <= 0 or atr <= 0:
             return 0
         vol = atr / price
-        if vol > 0.05:
-            pct = self.base_pct * 0.5
-        elif vol > 0.03:
-            pct = self.base_pct * 0.7
-        else:
-            pct = self.base_pct
+        if vol > 0.05: pct = self.base_pct * 0.5
+        elif vol > 0.03: pct = self.base_pct * 0.7
+        else: pct = self.base_pct
         amount = equity * min(pct, self.max_pct)
         lots = int(amount / (price * 100))
         return lots * 100

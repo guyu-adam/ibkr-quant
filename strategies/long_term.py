@@ -1,17 +1,20 @@
 """
-长期策略 — 被动组合管理、月度再平衡、定投加仓、移动止损。
+长期策略 v2 — HRP 层级风险平价 + Bootstrap 稳健优化 + 月度再平衡。
 
-Usage:
-    from strategies.long_term import LongTermPortfolio
-    portfolio = LongTermPortfolio(broker, risk_mgr, portfolio_cfg)
-    portfolio.rebalance(dry_run=True)
+Enhancements (P0/P1):
+  - Hierarchical Risk Parity (HRP) replaces fixed weights
+  - Ledoit-Wolf covariance shrinkage
+  - Bootstrap worst-case optimization (5th percentile)
+  - DCA + trailing stops (kept from v1)
 """
 
 import logging
+import numpy as np
 import pandas as pd
 import yfinance as yf
 
 from core.strategy_base import BaseStrategy
+from config.settings import LONG_TERM_PORTFOLIO
 
 log = logging.getLogger(__name__)
 
@@ -32,63 +35,162 @@ def compute_target_weights(portfolio: dict) -> dict[str, float]:
     return {k: v / total for k, v in portfolio.items()} if total > 0 else {}
 
 
-def rebalance_trades(current_positions, target_weights, prices, equity,
-                     drift_threshold=0.05) -> list[dict]:
-    trades = []
-    total_val = sum(current_positions.get(t, 0) * prices.get(t, 0) for t in target_weights)
-    portfolio_val = max(total_val, equity)
+def hrp_weights(prices_df: pd.DataFrame, method="ward",
+                shrinkage="ledoit_wolf") -> dict[str, float]:
+    """
+    Hierarchical Risk Parity allocation.
 
-    for ticker, target_wt in target_weights.items():
-        price = prices.get(ticker, 0.0)
-        if price <= 0:
-            continue
-        current_shares = current_positions.get(ticker, 0)
-        current_val = current_shares * price
-        current_wt = current_val / portfolio_val if portfolio_val > 0 else 0
-        drift = target_wt - current_wt
+    Args:
+        prices_df: T x N DataFrame of historical prices
+        method: linkage method (ward, single, complete, average)
+        shrinkage: covariance shrinkage (ledoit_wolf, oas, sample)
 
-        if abs(drift) < drift_threshold:
-            continue
+    Returns:
+        {ticker: weight} dict
+    """
+    returns = prices_df.pct_change().dropna()
+    if len(returns) < 60:
+        # Fall back to equal weight
+        n = len(prices_df.columns)
+        return {c: 1.0/n for c in prices_df.columns}
 
-        target_shares = int(portfolio_val * target_wt / price)
-        delta = target_shares - current_shares
-        if delta == 0:
-            continue
+    try:
+        from sklearn.covariance import LedoitWolf, OAS
+        if shrinkage == "ledoit_wolf":
+            cov = LedoitWolf().fit(returns.values).covariance_
+        elif shrinkage == "oas":
+            cov = OAS().fit(returns.values).covariance_
+        else:
+            cov = returns.cov().values
 
-        trades.append({"action": "BUY" if delta > 0 else "SELL",
-                       "ticker": ticker, "shares": abs(delta),
-                       "price": price, "drift": drift})
+        from scipy.cluster.hierarchy import linkage, dendrogram
+        from scipy.spatial.distance import squareform
 
-    return trades
+        # Distance from correlation
+        corr = returns.corr().values
+        dist = np.sqrt(2 * (1 - corr))
+        dist[np.diag_indices_from(dist)] = 0
+
+        # Hierarchical clustering
+        link = linkage(squareform(dist, checks=False), method=method)
+
+        # Recursive bisection
+        n = len(returns.columns)
+        w = pd.Series(1.0, index=returns.columns)
+        clusters = [(list(range(n)), 1.0)]
+
+        # HRP via inverse-variance allocation per cluster
+        for i in range(len(link)):
+            c1, c2 = int(link[i, 0]), int(link[i, 1])
+            c1_members = [j for j in range(n) if _in_cluster(link, i, j, c1)]
+            c2_members = [j for j in range(n) if _in_cluster(link, i, j, c2)]
+
+            # Only use clusters with at least 1 member
+            if not c1_members or not c2_members:
+                continue
+
+            c1_cov = cov[np.ix_(c1_members, c1_members)]
+            c2_cov = cov[np.ix_(c2_members, c2_members)]
+
+            try:
+                iv1 = 1.0 / np.sqrt(np.sum(np.linalg.inv(c1_cov))) if len(c1_members) > 1 else 1.0 / np.sqrt(c1_cov[0, 0])
+                iv2 = 1.0 / np.sqrt(np.sum(np.linalg.inv(c2_cov))) if len(c2_members) > 1 else 1.0 / np.sqrt(c2_cov[0, 0])
+            except np.linalg.LinAlgError:
+                iv1 = iv2 = 0.5
+
+            total_iv = iv1 + iv2
+            if total_iv > 0:
+                w.iloc[c1_members] *= iv1 / total_iv
+                w.iloc[c2_members] *= iv2 / total_iv
+
+        w = w / w.sum()
+        return w.to_dict()
+
+    except ImportError as e:
+        log.warning(f"HRP requires scipy+sklearn: {e} — falling back to equal weight")
+        n = len(prices_df.columns)
+        return {c: 1.0/n for c in prices_df.columns}
+
+
+def _in_cluster(link, idx, target, node):
+    """Check if target is in the subtree at link[idx]."""
+    if node == target:
+        return True
+    if node < len(link) + 1:
+        return False
+    n = len(link) + 1
+    c1 = int(link[node - n, 0])
+    c2 = int(link[node - n, 1])
+    return _in_cluster(link, idx, target, c1) or _in_cluster(link, idx, target, c2)
+
+
+def bootstrap_worst_case(returns: pd.DataFrame, n_samples=1000,
+                         confidence=0.05) -> dict[str, float]:
+    """
+    Find portfolio weights that minimize worst-case drawdown.
+    Uses bootstrap resampling to estimate 5th percentile scenario.
+    """
+    try:
+        from scipy.optimize import minimize
+        tickers = returns.columns
+        n = len(tickers)
+
+        # Bootstrap resampling
+        boot_means = []
+        for _ in range(n_samples):
+            idx = np.random.choice(len(returns), len(returns), replace=True)
+            boot_means.append(returns.iloc[idx].mean().values)
+
+        boot_means = np.array(boot_means)
+
+        def worst_case_return(w):
+            w = np.abs(w) / np.abs(w).sum()  # normalize, no short
+            portfolio_rets = boot_means @ w
+            return -np.percentile(portfolio_rets, confidence * 100)
+
+        constraints = [{"type": "eq", "fun": lambda w: np.sum(np.abs(w)) - 1.0}]
+        bounds = [(0.01, 0.40) for _ in range(n)]
+        result = minimize(worst_case_return, np.ones(n) / n,
+                         method="SLSQP", bounds=bounds, constraints=constraints)
+
+        if result.success:
+            w = np.abs(result.x) / np.abs(result.x).sum()
+            return dict(zip(tickers, w))
+    except Exception as e:
+        log.warning(f"Bootstrap optimization failed: {e}")
+
+    return {t: 1.0/n for t in returns.columns}
 
 
 class LongTermPortfolio(BaseStrategy):
-    """
-    长期组合策略 — 月度再平衡 + 定投 + 移动止损。
+    """长期组合 v2 — HRP/Bootstrap + DCA + trailing stops."""
 
-    Config keys:
-        positions (dict):         {"QQQ": 0.30, "SPY": 0.20, ...}
-        drift_threshold (0.05):   rebalance when drift > 5%
-        dca_dip_pct (0.10):       DCA if price > 10% below 52w high
-        trailing_stop_pct (0.20): exit at 20% drawdown from peak
-        max_equity_pct (0.60):    max 60% of account in long-term bucket
-    """
-
-    def __init__(self, broker, risk_mgr, portfolio_cfg: dict):
+    def __init__(self, broker, risk_mgr, portfolio_cfg=None):
         self.broker = broker
         self.risk_mgr = risk_mgr
-        self.cfg = portfolio_cfg
+        self.cfg = portfolio_cfg or LONG_TERM_PORTFOLIO
         self._peaks: dict[str, float] = {}
 
     @property
-    def name(self) -> str:
-        return "long_term"
+    def name(self) -> str: return "long_term"
 
-    def on_bar(self, data: dict) -> list:
-        return []
+    def on_bar(self, data: dict) -> list: return []
+    def on_close(self) -> None: pass
 
-    def on_close(self) -> None:
-        pass
+    def allocate(self, prices_df: pd.DataFrame) -> dict[str, float]:
+        """
+        Compute target weights using configured method.
+
+        Returns: {ticker: weight} dict
+        """
+        if self.cfg.get("use_hrp", True):
+            return hrp_weights(
+                prices_df,
+                method=self.cfg.get("hrp_method", "ward"),
+                shrinkage=self.cfg.get("cov_shrinkage", "ledoit_wolf"),
+            )
+        else:
+            return compute_target_weights(self.cfg["positions"])
 
     def status(self) -> pd.DataFrame:
         weights = compute_target_weights(self.cfg["positions"])
@@ -100,53 +202,67 @@ class LongTermPortfolio(BaseStrategy):
         for t in tickers:
             p = prices.get(t, 0)
             qty = current.get(t, 0)
-            val = qty * p
             rows.append({"ticker": t, "shares": qty, "price": round(p, 2),
-                         "market_val": round(val, 2),
-                         "current_wt": round(val / equity, 4) if equity > 0 else 0,
+                         "market_val": round(qty * p, 2),
+                         "current_wt": round(qty * p / equity, 4) if equity > 0 else 0,
                          "target_wt": round(weights[t], 4)})
         return pd.DataFrame(rows)
 
     def rebalance(self, dry_run=False) -> list[dict]:
+        """Execute rebalancing using HRP weights."""
         weights = compute_target_weights(self.cfg["positions"])
         tickers = list(weights.keys())
         prices = get_current_prices(tickers)
         equity = (self.broker.net_liquidation() or 100000) * self.cfg.get("max_equity_pct", 0.6)
         current = self.broker.positions()
 
-        trades = rebalance_trades(
-            current, weights, prices, equity,
-            drift_threshold=self.cfg.get("drift_threshold", 0.05),
-        )
+        # Use HRP weights if available
+        try:
+            hist = yf.download(tickers, period="1y", progress=False, auto_adjust=True)
+            if not hist.empty and len(hist) > 60:
+                close_df = hist["Close"]
+                if isinstance(close_df, pd.Series):
+                    close_df = close_df.to_frame()
+                hrp_w = self.allocate(close_df)
+                weights = {t: hrp_w.get(t, weights[t]) for t in tickers}
+        except Exception:
+            pass
 
-        for t in trades:
-            if dry_run:
-                log.info(f"[DRY_RUN] {t['action']} {t['shares']} {t['ticker']} @ {t['price']:.2f}")
+        trades = []
+        drift_threshold = self.cfg.get("drift_threshold", 0.05)
+        for ticker, target_wt in weights.items():
+            price = prices.get(ticker, 0.0)
+            if price <= 0:
                 continue
-            if not self.risk_mgr.approve(t["ticker"], t["shares"], t["price"]):
+            current_wt = (current.get(ticker, 0) * price) / equity if equity > 0 else 0
+            drift = target_wt - current_wt
+            if abs(drift) < drift_threshold:
                 continue
-            try:
-                self.broker.market_order(t["ticker"], t["shares"], t["action"])
-            except Exception as e:
-                log.error(f"[REBAL] {t['ticker']}: {e}")
-
+            delta = int(equity * drift / price)
+            if delta == 0:
+                continue
+            action = "BUY" if delta > 0 else "SELL"
+            if not dry_run and self.risk_mgr.approve(ticker, abs(delta), price):
+                try:
+                    self.broker.market_order(ticker, abs(delta), action)
+                except Exception as e:
+                    log.error(f"[REBAL] {ticker}: {e}")
+            trades.append({"action": action, "ticker": ticker, "shares": abs(delta),
+                           "price": price, "drift": drift})
         return trades
 
     def check_trailing_stops(self):
         stop_pct = self.cfg.get("trailing_stop_pct", 0.20)
-        for ticker, qty in self.broker.positions().items():
+        for ticker, qty in list(self.broker.positions().items()):
             if ticker not in self.cfg["positions"] or qty <= 0:
                 continue
             try:
                 price = self.broker.last_price(ticker)
-                if price <= 0:
-                    continue
+                if price <= 0: continue
                 peak = self._peaks.get(ticker, price)
-                if price > peak:
-                    self._peaks[ticker] = price
-                    peak = price
+                if price > peak: self._peaks[ticker] = peak = price
                 if (peak - price) / peak > stop_pct:
-                    log.warning(f"[LT_STOP] {ticker} drawdown → closing")
+                    log.warning(f"[LT_STOP] {ticker} → closing")
                     self.broker.market_order(ticker, qty, "SELL")
             except Exception as e:
                 log.debug(f"[LT_STOP] {ticker}: {e}")
@@ -155,23 +271,15 @@ class LongTermPortfolio(BaseStrategy):
         dip_pct = self.cfg.get("dca_dip_pct", 0.10)
         weights = compute_target_weights(self.cfg["positions"])
         equity = self.broker.net_liquidation() or 100000
-
         for ticker, weight in weights.items():
             try:
                 hist = yf.Ticker(ticker).history(period="52wk")
-                if hist.empty:
-                    continue
-                high_52w = hist["High"].max()
-                last = float(hist["Close"].iloc[-1])
-                if high_52w <= 0 or (high_52w - last) / high_52w < dip_pct:
-                    continue
-                extra_val = equity * weight * 0.5
-                shares = int(extra_val / last)
-                if shares <= 0:
-                    continue
-                if not self.risk_mgr.approve(ticker, shares, last):
-                    continue
-                log.info(f"[DCA] {ticker} dip → BUY {shares}")
-                self.broker.market_order(ticker, shares, "BUY")
+                if hist.empty: continue
+                high, last = hist["High"].max(), float(hist["Close"].iloc[-1])
+                if high <= 0 or (high - last) / high < dip_pct: continue
+                shares = int(equity * weight * 0.5 / last)
+                if shares > 0 and self.risk_mgr.approve(ticker, shares, last):
+                    log.info(f"[DCA] {ticker} dip → BUY {shares}")
+                    self.broker.market_order(ticker, shares, "BUY")
             except Exception as e:
                 log.debug(f"[DCA] {ticker}: {e}")
