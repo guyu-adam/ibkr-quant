@@ -9,12 +9,13 @@ Usage:
 """
 
 import logging
+from core.broker_interface import BrokerInterface
 from config.settings import IBKR_HOST, IBKR_PORT, IBKR_CLIENT
 
 log = logging.getLogger(__name__)
 
 
-class IBKRBroker:
+class IBKRBroker(BrokerInterface):
     """ib_insync wrapper for Interactive Brokers."""
 
     def __init__(self, host=IBKR_HOST, port=IBKR_PORT, client_id=IBKR_CLIENT):
@@ -52,7 +53,7 @@ class IBKRBroker:
                     return float(a.value)
         except Exception:
             pass
-        return None
+        return 0.0
 
     def daily_pnl(self) -> float:
         try:
@@ -80,6 +81,31 @@ class IBKRBroker:
             return float(ticker.last or 0)
         except Exception:
             return 0.0
+
+    def get_bars(self, symbol: str, duration: str = "3 D",
+                 bar_size: str = "5 mins"):
+        """Fetch historical bars from IBKR."""
+        try:
+            from ib_insync import Stock
+            contract = Stock(symbol, "SMART", "USD")
+            self._ib.qualifyContracts(contract)
+            bars = self._ib.reqHistoricalData(
+                contract, endDateTime="", durationStr=duration,
+                barSizeSetting=bar_size, whatToShow="TRADES",
+                useRTH=True, formatDate=1,
+            )
+            import pandas as pd
+            df = pd.DataFrame(bars)
+            if df.empty or "close" not in df.columns:
+                return None
+            df = df.rename(columns={
+                "open": "open", "high": "high", "low": "low",
+                "close": "close", "volume": "volume",
+            })
+            return df[["open", "high", "low", "close", "volume"]]
+        except Exception as e:
+            log.error(f"IBKR get_bars failed: {e}")
+            return None
 
     def market_order(self, symbol: str, shares: int, action: str):
         try:

@@ -10,6 +10,7 @@ Usage:
 import logging
 import numpy as np
 import pandas as pd
+from core.indicators import rsi as _rsi_impl
 from config.settings import HMM_N_STATES, HMM_LOOKBACK, HMM_RETRAIN_FREQ, HMM_FEATURES
 
 log = logging.getLogger(__name__)
@@ -32,16 +33,8 @@ class RegimeDetector:
         feats["ret_21d"] = close.pct_change(21)
         feats["vol_5d"]  = feats["ret_1d"].rolling(5).std()
         feats["vol_21d"] = feats["ret_1d"].rolling(21).std()
-        feats["rsi_14"]  = self._rsi(close, 14)
+        feats["rsi_14"]  = _rsi_impl(close, 14)
         return feats.dropna()
-
-    @staticmethod
-    def _rsi(close: pd.Series, period: int) -> pd.Series:
-        delta = close.diff()
-        gain = delta.clip(lower=0).ewm(span=period, adjust=False).mean()
-        loss = (-delta).clip(lower=0).ewm(span=period, adjust=False).mean()
-        rs = gain / loss.replace(0, np.nan)
-        return 100.0 - 100.0 / (1.0 + rs)
 
     def fit_predict(self, df: pd.DataFrame) -> int:
         """Fit HMM on price history, return current regime label."""

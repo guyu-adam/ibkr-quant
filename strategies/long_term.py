@@ -82,8 +82,8 @@ def hrp_weights(prices_df: pd.DataFrame, method="ward",
         # HRP via inverse-variance allocation per cluster
         for i in range(len(link)):
             c1, c2 = int(link[i, 0]), int(link[i, 1])
-            c1_members = [j for j in range(n) if _in_cluster(link, i, j, c1)]
-            c2_members = [j for j in range(n) if _in_cluster(link, i, j, c2)]
+            c1_members = [j for j in range(n) if _in_cluster(link, j, c1)]
+            c2_members = [j for j in range(n) if _in_cluster(link, j, c2)]
 
             # Only use clusters with at least 1 member
             if not c1_members or not c2_members:
@@ -112,8 +112,7 @@ def hrp_weights(prices_df: pd.DataFrame, method="ward",
         return {c: 1.0/n for c in prices_df.columns}
 
 
-def _in_cluster(link, idx, target, node):
-    """Check if target is in the subtree at link[idx]."""
+def _in_cluster(link, target, node):
     if node == target:
         return True
     if node < len(link) + 1:
@@ -121,7 +120,7 @@ def _in_cluster(link, idx, target, node):
     n = len(link) + 1
     c1 = int(link[node - n, 0])
     c2 = int(link[node - n, 1])
-    return _in_cluster(link, idx, target, c1) or _in_cluster(link, idx, target, c2)
+    return _in_cluster(link, target, c1) or _in_cluster(link, target, c2)
 
 
 def bootstrap_worst_case(returns: pd.DataFrame, n_samples=1000,

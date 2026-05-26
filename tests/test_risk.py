@@ -76,6 +76,66 @@ class TestRiskManager(unittest.TestCase):
         self.rm.reset_halt()
         self.assertFalse(self.rm._halted)
 
+    # ── Kelly fraction ─────────────────────────────────────────────────────────
+    def test_kelly_no_trades_returns_default(self):
+        k = self.rm.kelly_fraction()
+        self.assertAlmostEqual(k, 0.01)
+
+    def test_kelly_all_wins(self):
+        for _ in range(30):
+            self.rm.record_trade(100.0, 1000.0)  # $100 win on $1000 risk
+        k = self.rm.kelly_fraction()
+        # All wins → avg_loss=0 → falls back to TRADE_RISK_PCT
+        self.assertAlmostEqual(k, 0.01)
+
+    def test_kelly_all_losses(self):
+        for _ in range(30):
+            self.rm.record_trade(-500.0, 1000.0)
+        k = self.rm.kelly_fraction()
+        self.assertAlmostEqual(k, 0.01)  # defaults to TRADE_RISK_PCT
+
+    def test_record_trade_trims_history(self):
+        for i in range(200):
+            self.rm.record_trade(50 if i % 2 == 0 else -30, 1000.0)
+        self.assertLessEqual(len(self.rm._trade_log), 200)
+
+    # ── ATR multiplier ─────────────────────────────────────────────────────────
+    def test_atr_mult_low_vol(self):
+        self.rm.vix = 10.0
+        self.assertEqual(self.rm.get_atr_multiplier(), 1.5)
+
+    def test_atr_mult_mid_vol(self):
+        self.rm.vix = 20.0
+        self.assertEqual(self.rm.get_atr_multiplier(), 2.0)
+
+    def test_atr_mult_high_vol(self):
+        self.rm.vix = 30.0
+        self.assertEqual(self.rm.get_atr_multiplier(), 3.0)
+
+    # ── Intraday peak ──────────────────────────────────────────────────────────
+    def test_update_intraday_peak(self):
+        self.assertIsNone(self.rm._intraday_peak)
+        self.mock_broker.net_liquidation.return_value = 105_000.0
+        self.rm.update_intraday_peak()
+        self.assertEqual(self.rm._intraday_peak, 105_000.0)
+        self.mock_broker.net_liquidation.return_value = 103_000.0
+        self.rm.update_intraday_peak()
+        self.assertEqual(self.rm._intraday_peak, 105_000.0)  # unchanged
+
+    # ── Intraday drawdown halt ─────────────────────────────────────────────────
+    def test_approve_intraday_drawdown(self):
+        from datetime import date
+        self.rm._today = date.today()
+        self.rm._week_number = date.today().isocalendar()[1]
+        self.rm._day_start_equity = 102_000.0
+        self.rm._intraday_peak = 102_000.0
+        self.mock_broker.net_liquidation.return_value = 100_000.0
+        self.mock_broker.daily_pnl.return_value = 0.0
+        # drawdown = (102000 - 100000) / 102000 ≈ 1.96% > 1.5%
+        result = self.rm.approve("AAPL", 100, 150.0)
+        self.assertFalse(result)
+        self.assertTrue(self.rm._halted)
+
 
 if __name__ == "__main__":
     unittest.main()

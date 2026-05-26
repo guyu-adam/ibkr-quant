@@ -11,12 +11,13 @@ Usage:
 import logging
 import pandas as pd
 
+from core.broker_interface import BrokerInterface
 from config.settings import BINANCE_API_KEY, BINANCE_SECRET
 
 log = logging.getLogger(__name__)
 
 
-class BinanceBroker:
+class BinanceBroker(BrokerInterface):
     """Binance exchange adapter — spot & futures."""
 
     def __init__(self, api_key=BINANCE_API_KEY, secret=BINANCE_SECRET, testnet=False):

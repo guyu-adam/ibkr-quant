@@ -11,6 +11,7 @@ LLM Alpha 挖掘 (P2) — 用大语言模型生成 Alpha 因子表达式。
 import logging
 import numpy as np
 import pandas as pd
+from core.indicators import rsi as _rsi_impl
 
 log = logging.getLogger(__name__)
 
@@ -85,7 +86,7 @@ class LLMAlphaMiner:
         factors["bb_break"] = abs(close - close.rolling(20).mean()) / (2 * bb_std + 1e-8)
 
         # ts_rsi_reversal
-        factors["rsi_rev"] = (_rsi(close, 14) - 50) / 50
+        factors["rsi_rev"] = (_rsi_impl(close, 14) - 50) / 50
 
         # ts_alpha_101_style
         factors["alpha_101"] = (close.rolling(5).mean() / close.rolling(20).mean() - 1).rank(pct=True)
@@ -113,11 +114,3 @@ class LLMAlphaMiner:
         sorted_factors = sorted(self._ic_scores.items(),
                                 key=lambda x: abs(x[1]), reverse=True)
         return sorted_factors[:self.top_k]
-
-
-def _rsi(close, period):
-    delta = close.diff()
-    gain = delta.clip(lower=0).ewm(span=period, adjust=False).mean()
-    loss = (-delta).clip(lower=0).ewm(span=period, adjust=False).mean()
-    rs = gain / loss.replace(0, np.nan)
-    return 100.0 - 100.0 / (1.0 + rs)

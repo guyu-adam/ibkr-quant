@@ -1,43 +1,51 @@
 """
 quant — 多市场量化交易系统配置 v3
+
+API keys are loaded from .env via python-dotenv.
+Copy .env.example to .env and fill in your credentials.
 """
+
+import os
+from dotenv import load_dotenv
+
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"))
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # IBKR
 # ═══════════════════════════════════════════════════════════════════════════════
-IBKR_HOST   = "127.0.0.1"
-IBKR_PORT   = 7497
-IBKR_CLIENT = 1
-PAPER_TRADE = True
+IBKR_HOST   = os.getenv("IBKR_HOST", "127.0.0.1")
+IBKR_PORT   = int(os.getenv("IBKR_PORT", "7497"))
+IBKR_CLIENT = int(os.getenv("IBKR_CLIENT", "1"))
+PAPER_TRADE = os.getenv("PAPER_TRADE", "true").lower() in ("1", "true", "yes")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # OKX
 # ═══════════════════════════════════════════════════════════════════════════════
-OKX_FLAG   = "1"
-OKX_DOMAIN = "https://www.okx.com"
-OKX_API_KEY = ""
-OKX_SECRET  = ""
-OKX_PASSPHRASE = ""
+OKX_FLAG   = os.getenv("OKX_FLAG", "1")
+OKX_DOMAIN = os.getenv("OKX_DOMAIN", "https://www.okx.com")
+OKX_API_KEY = os.getenv("OKX_API_KEY", "")
+OKX_SECRET  = os.getenv("OKX_SECRET", "")
+OKX_PASSPHRASE = os.getenv("OKX_PASSPHRASE", "")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Binance
 # ═══════════════════════════════════════════════════════════════════════════════
-BINANCE_API_KEY = ""
-BINANCE_SECRET  = ""
+BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
+BINANCE_SECRET  = os.getenv("BINANCE_SECRET", "")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Charles Schwab
 # ═══════════════════════════════════════════════════════════════════════════════
-SCHWAB_API_KEY    = ""
-SCHWAB_SECRET     = ""
-SCHWAB_CALLBACK   = "https://127.0.0.1:8080"
+SCHWAB_API_KEY    = os.getenv("SCHWAB_API_KEY", "")
+SCHWAB_SECRET     = os.getenv("SCHWAB_SECRET", "")
+SCHWAB_CALLBACK   = os.getenv("SCHWAB_CALLBACK", "https://127.0.0.1:8080")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 同花顺
 # ═══════════════════════════════════════════════════════════════════════════════
-THS_HOST = "127.0.0.1"
-THS_PORT = 8010
-THS_ACCOUNT = ""
+THS_HOST    = os.getenv("THS_HOST", "127.0.0.1")
+THS_PORT    = int(os.getenv("THS_PORT", "8010"))
+THS_ACCOUNT = os.getenv("THS_ACCOUNT", "")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 风控 (v3 — 分层熔断 + 分数凯利)
@@ -104,6 +112,7 @@ ALPHA_TOP_K       = 20
 # 美股 — 快速交易
 # ═══════════════════════════════════════════════════════════════════════════════
 US_WATCHLIST    = ["SPY", "QQQ", "AAPL", "MSFT", "NVDA", "TSLA", "AMZN"]
+WATCHLIST       = US_WATCHLIST   # backward-compat alias
 RSI_PERIOD      = 14
 RSI_OVERSOLD    = 30
 RSI_OVERBOUGHT  = 70

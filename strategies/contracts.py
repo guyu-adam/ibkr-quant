@@ -13,6 +13,7 @@ import logging
 import numpy as np
 
 from core.strategy_base import BaseStrategy
+from core.indicators import ema
 from config.settings import (
     GRID_LEVELS, GRID_SPACING_ATR, GRID_TREND_FILTER, GRID_EMA_PERIOD,
 )
@@ -55,8 +56,8 @@ class GridScalpStrategy(BaseStrategy):
         # Trend filter: determine allowed direction
         trend_allowed = "both"
         if self.trend_filter and len(self._price_history) >= self.ema_period:
-            ema = self._ema(self._price_history, self.ema_period)
-            if price > ema:
+            ema_val = ema(self._price_history, self.ema_period)
+            if price > ema_val:
                 trend_allowed = "long"   # only build long-side grid
             else:
                 trend_allowed = "short"  # only build short-side grid
@@ -106,16 +107,6 @@ class GridScalpStrategy(BaseStrategy):
         prices = np.array(self._price_history[-15:])
         diffs = np.abs(np.diff(prices))
         return float(np.mean(diffs))
-
-    @staticmethod
-    def _ema(data: list, period: int) -> float:
-        if len(data) < period:
-            return data[-1]
-        alpha = 2 / (period + 1)
-        ema = data[0]
-        for x in data[1:]:
-            ema = alpha * x + (1 - alpha) * ema
-        return ema
 
     def _save_state(self):
         try:

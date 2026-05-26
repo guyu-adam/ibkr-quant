@@ -16,6 +16,7 @@ import numpy as np
 from core.strategy_base import BaseStrategy
 from core.data_feed import DataFeed
 from core.regime_detector import RegimeDetector
+from core.indicators import rsi, atr, macd
 from config.settings import (
     SIGNAL_COOLDOWN, ATR_PERIOD, ATR_MULT_LOW_VOL, ATR_MULT_MID_VOL, ATR_MULT_HIGH_VOL,
 )
@@ -65,38 +66,12 @@ class MeanReversionStrategy(BaseStrategy):
         elif self._vix >= 25: return ATR_MULT_HIGH_VOL
         return ATR_MULT_MID_VOL
 
-    # ── Indicators (unchanged from v1) ────────────────────────────────────
-    @staticmethod
-    def _rsi(close, period):
-        delta = close.diff()
-        gain = delta.clip(lower=0).ewm(span=period, adjust=False).mean()
-        loss = (-delta).clip(lower=0).ewm(span=period, adjust=False).mean()
-        rs = gain / loss.replace(0, np.nan)
-        vals = 100.0 - 100.0 / (1.0 + rs)
-        vals[loss == 0] = 100.0
-        vals.iloc[:period] = np.nan
-        return vals
-
-    @staticmethod
-    def _atr(high, low, close, period):
-        prev = close.shift(1)
-        tr = pd.concat([high - low, (high - prev).abs(), (low - prev).abs()], axis=1).max(axis=1)
-        return tr.ewm(span=period, adjust=False).mean()
-
-    @staticmethod
-    def _macd(close, fast, slow, signal):
-        ef = close.ewm(span=fast, adjust=False).mean()
-        es = close.ewm(span=slow, adjust=False).mean()
-        line = ef - es
-        sig = line.ewm(span=signal, adjust=False).mean()
-        return pd.DataFrame({"line": line, "signal": sig, "histogram": line - sig})
-
     # ── Core evaluate (with HMM filter) ───────────────────────────────────
     def evaluate(self, feed: DataFeed, symbol: str,
                  positions: dict | None = None) -> dict:
         df = feed.fetch_history(symbol)
         result = {'signal': 'hold', 'score': 0.0, 'rsi': 0.0,
-                  'atr': 0.0, 'close': 0.0, 'reason': '', 'regime': self._regime._last_regime}
+                  'atr': 0.0, 'close': 0.0, 'reason': '', 'regime': 0}
 
         if df is None or len(df) < 30:
             result['reason'] = 'insufficient data'
@@ -119,9 +94,9 @@ class MeanReversionStrategy(BaseStrategy):
         low   = df['low'].astype(float)
         vol   = df['volume'].astype(float)
 
-        rsi_vals = self._rsi(close, self.rsi_period)
-        atr_vals = self._atr(high, low, close, self.atr_period)
-        macd_df  = self._macd(close, self.macd_fast, self.macd_slow, self.macd_signal)
+        rsi_vals = rsi(close, self.rsi_period)
+        atr_vals = atr(high, low, close, self.atr_period)
+        macd_df  = macd(close, self.macd_fast, self.macd_slow, self.macd_signal)
 
         cur_rsi   = float(rsi_vals.iloc[-1])
         cur_close = float(close.iloc[-1])

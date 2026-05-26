@@ -66,8 +66,9 @@ class MetaLabeler:
             proba = self._model.predict_proba(X)[0]
             win_prob = proba[1] if len(proba) > 1 else proba[0]
             return win_prob >= self.confidence
-        except Exception:
-            return True
+        except Exception as e:
+            log.error(f"Meta-label filter failed: {e} — rejecting signal")
+            return False
 
     def _train(self):
         """Train LightGBM binary classifier on recorded trades."""

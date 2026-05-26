@@ -5,7 +5,7 @@
 Multi-market, multi-strategy quantitative trading system. US stocks, HK stocks, crypto, A-shares — unified architecture, hot-swappable broker interfaces.
 
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://python.org)
-[![Tests](https://img.shields.io/badge/tests-38%2F38%20passed-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-86%2F86%20passed-brightgreen.svg)](tests/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 ---
@@ -29,7 +29,9 @@ Multi-market, multi-strategy quantitative trading system. US stocks, HK stocks, 
 ├─────────────────────────────────────────────────────────────┤
 │  core/                                                      │
 │  strategy_base  risk  data_feed  engine  ml_model           │
-│  alpha_factors  portfolio_optimizer  analytics              │
+│  alpha_factors  portfolio_optimizer  indicators  backtest   │
+│  regime_detector  ensemble  meta_labeling  walkforward      │
+│  transformer_model  llm_alpha  broker_interface             │
 ├─────────────────────────────────────────────────────────────┤
 │  paper_trading/              tests/                         │
 │  模拟盘 Web 仪表盘            38 tests · 100% pass            │
@@ -184,11 +186,17 @@ pytest tests/ --cov=core  # 含覆盖率报告
 ```
 tests/
 ├── test_strategy_base.py        # 策略基类接口验证 (8)
-├── test_risk.py                 # 风控模块 (9)
+├── test_risk.py                 # 风控模块 (19)
 ├── test_alpha_factors.py        # 因子计算 (5)
 ├── test_ml_model.py             # ML 模型 (5)
 ├── test_paper_trading.py        # 模拟盘 (5)
-└── test_portfolio_optimizer.py  # 组合优化 (6)
+├── test_portfolio_optimizer.py  # 组合优化 (6)
+├── test_hrp.py                  # HRP 层级风险平价 (8)
+├── test_ensemble.py             # 策略融合引擎 (7)
+├── test_regime_detector.py      # 市场状态检测 (4)
+├── test_meta_labeling.py        # Meta-Labeling (5)
+├── test_contracts.py            # 合约网格策略 (7)
+└── test_fast_trading.py         # 快速交易策略 (7)
 ```
 
 ---
@@ -201,10 +209,17 @@ tests/
 - [x] RSI 均值回归策略（完整实现）
 - [x] 长期组合管理（再平衡/DCA/移动止损）
 - [x] 合约网格震荡（完整实现）
-- [ ] 期权链分析 + 自动下单
-- [ ] 保证金配对交易实盘
-- [ ] 嘉信 OAuth 2.0 完整接入
-- [ ] 同花顺客户端交易协议
+- [x] BrokerInterface ABC 统一接口
+- [x] 风控全面测试覆盖 (kelly/ATR/熔断)
+- [x] .env 配置外部化
+- [x] CI/CD + pre-commit hooks
+- [x] pyproject.toml 项目打包
+- [x] 期权链分析 + 自动下单 (Covered Call / Protective Put / Iron Condor)
+- [x] 嘉信 OAuth 2.0 完整接入
+- [x] 同花顺 + 东方财富 API 接入
+- [x] Transformer 模型 v2 修复 (causal mask, early stopping, gradient clipping)
+- [x] 回测引擎 (交易成本 + 滑点建模)
+- [x] 测试从 38 → 86 (12 个测试文件)
 - [ ] 实盘回测对比报告
 
 ---

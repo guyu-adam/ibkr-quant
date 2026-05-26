@@ -1,12 +1,14 @@
 """
-Transformer 选股模型 (P2) — Decoder-Only 多标的价格预测。
+Transformer 选股模型 v2 (P3) — Encoder-based price forecasting.
 
-Based on: arxiv 2504.16361 — decoder-only transformers outperform
-encoder-only and encoder-decoder for stock forecasting.
-
-Architecture: Causal Transformer Decoder → Linear head → future returns
-Input: [batch, seq_len, n_features] where features = returns + factors
+Architecture: TransformerEncoder → Linear head → future returns
+Input: [batch, seq_len, n_features] — lagged returns + factors
 Output: ranked expected returns → long top_k, short bottom_k
+
+v2 fixes:
+  - Replaced decoder-only with encoder (no zero-memory cross-attention)
+  - Added gradient clipping, LR scheduler, early stopping
+  - Proper train/val split and epoch logging
 
 Usage:
     from core.transformer_model import PriceTransformer
@@ -27,11 +29,7 @@ log = logging.getLogger(__name__)
 
 
 class PriceTransformer:
-    """
-    Decoder-only Transformer for multi-stock return prediction.
-
-    Uses causal self-attention to model temporal dependencies in price data.
-    """
+    """Transformer encoder for multi-stock return prediction."""
 
     def __init__(self, n_features=32, d_model=TRANSFORMER_D_MODEL,
                  n_heads=TRANSFORMER_N_HEADS, n_layers=TRANSFORMER_N_LAYERS,
@@ -46,22 +44,11 @@ class PriceTransformer:
         self.dropout = dropout
         self._model = None
         self._trained = False
-        self._input_proj = None
-        self._output_proj = None
 
     def train(self, X: np.ndarray, y: np.ndarray,
-              epochs=50, batch_size=32, lr=0.001, val_split=0.2):
-        """
-        Train the transformer model.
-
-        Args:
-            X: [samples, seq_len, n_features] feature tensor
-            y: [samples] target returns
-            epochs: training epochs
-            batch_size: mini-batch size
-            lr: learning rate
-            val_split: validation fraction
-        """
+              epochs=80, batch_size=32, lr=0.001, val_split=0.2,
+              patience=10):
+        """Train the transformer with early stopping and LR scheduling."""
         try:
             import torch
             import torch.nn as nn
@@ -69,8 +56,7 @@ class PriceTransformer:
 
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-            # Build model
-            model = _DecoderTransformer(
+            model = _EncoderTransformer(
                 n_features=self.n_features,
                 d_model=self.d_model,
                 n_heads=self.n_heads,
@@ -80,16 +66,22 @@ class PriceTransformer:
             ).to(device)
 
             # Split
-            n_val = int(len(X) * val_split)
-            X_train, y_train = X[:-n_val or 1], y[:-n_val or 1]
-            X_val, y_val = X[-n_val:], y[-n_val:]
+            n_val = max(1, int(len(X) * val_split))
+            X_train, y_t = X[:-n_val], y[:-n_val]
+            X_val, y_v = X[-n_val:], y[-n_val:]
 
             train_data = TensorDataset(
-                torch.FloatTensor(X_train), torch.FloatTensor(y_train))
-            train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
+                torch.FloatTensor(X_train), torch.FloatTensor(y_t))
+            train_loader = DataLoader(train_data, batch_size=batch_size,
+                                      shuffle=True)
 
             optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode='min', factor=0.5, patience=5, verbose=False)
             criterion = nn.MSELoss()
+            best_val_loss = float('inf')
+            best_state = None
+            patience_counter = 0
 
             for epoch in range(epochs):
                 model.train()
@@ -100,20 +92,39 @@ class PriceTransformer:
                     pred = model(batch_X).squeeze(-1)
                     loss = criterion(pred, batch_y)
                     loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                     optimizer.step()
                     total_loss += loss.item()
 
-                if (epoch + 1) % 20 == 0:
-                    model.eval()
-                    with torch.inference_mode():
-                        val_pred = model(torch.FloatTensor(X_val).to(device)).squeeze(-1).cpu()
-                        val_loss = float(criterion(val_pred, torch.FloatTensor(y_val)))
-                    log.info(f"Transformer epoch {epoch+1}/{epochs}: "
-                            f"train_loss={total_loss/len(train_loader):.4f} val_loss={val_loss:.4f}")
+                model.eval()
+                with torch.inference_mode():
+                    val_pred = model(torch.FloatTensor(X_val).to(device)).squeeze(-1).cpu()
+                    val_loss = float(criterion(val_pred, torch.FloatTensor(y_v)))
 
+                scheduler.step(val_loss)
+
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+
+                if (epoch + 1) % 20 == 0:
+                    log.info(f"Transformer epoch {epoch+1}/{epochs}: "
+                             f"train_loss={total_loss/len(train_loader):.4f} "
+                             f"val_loss={val_loss:.4f}")
+
+                if patience_counter >= patience:
+                    log.info(f"Early stopping at epoch {epoch+1}")
+                    break
+
+            if best_state is not None:
+                model.load_state_dict(best_state)
             self._model = model.to("cpu")
             self._trained = True
-            log.info(f"Transformer trained: {len(X_train)} samples")
+            log.info(f"Transformer trained: {len(X_train)} samples, "
+                     f"best_val_loss={best_val_loss:.6f}")
 
         except ImportError:
             log.warning("torch not installed — transformer disabled")
@@ -139,13 +150,13 @@ class PriceTransformer:
         """Return (long_list, short_list) ranked by predicted returns."""
         preds = self.predict(X)
         ranked = sorted(zip(symbols, preds), key=lambda x: x[1], reverse=True)
-        longs  = [s for s, _ in ranked[:top_k]]
+        longs = [s for s, _ in ranked[:top_k]]
         shorts = [s for s, _ in ranked[-bottom_k:]]
         return longs, shorts
 
 
-class _DecoderTransformer:
-    """Internal PyTorch module — decoder-only transformer for time series."""
+class _EncoderTransformer:
+    """Transformer encoder for time series — self-attention, no cross-attention."""
 
     def __init__(self, n_features, d_model, n_heads, n_layers, seq_len, dropout):
         import torch
@@ -153,20 +164,17 @@ class _DecoderTransformer:
         super().__init__()
         self.input_proj = nn.Linear(n_features, d_model)
         self.pos_encoding = _PositionalEncoding(d_model, dropout, seq_len)
-        decoder_layer = nn.TransformerDecoderLayer(
+        encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model, nhead=n_heads, dropout=dropout,
             dim_feedforward=d_model * 4, batch_first=True,
         )
-        self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=n_layers)
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
         self.output_proj = nn.Linear(d_model, 1)
-        self._dummy_memory = nn.Parameter(torch.zeros(1, 1, d_model))
 
     def forward(self, x):
-        import torch
-        mem = self._dummy_memory.expand(x.size(0), -1, -1)
         x = self.input_proj(x)
         x = self.pos_encoding(x)
-        x = self.decoder(x, mem)
+        x = self.encoder(x)
         return self.output_proj(x[:, -1, :])
 
 

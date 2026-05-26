@@ -15,6 +15,7 @@ import logging
 import functools
 import pandas as pd
 
+from core.broker_interface import BrokerInterface
 from config.settings import OKX_DOMAIN
 
 log = logging.getLogger(__name__)
@@ -43,7 +44,7 @@ def _retry(func):
     return wrapper
 
 
-class OKXBroker:
+class OKXBroker(BrokerInterface):
     def __init__(self, api_key=None, secret_key=None, passphrase=None,
                  flag="1", domain=OKX_DOMAIN):
         self.flag = flag
@@ -154,8 +155,16 @@ class OKXBroker:
             for pos in resp.get("data", []) if float(pos.get("pos", 0)) != 0
         }
 
-    def positions(self): return self.get_positions()
-    def daily_pnl(self): return sum(float(p.get("upl", 0)) for p in self.get_positions().values())
+    def positions(self) -> dict[str, float]:
+        """Unified interface: {instId: quantity}."""
+        raw = self.get_positions()
+        return {
+            inst_id: float(p.get("pos", 0))
+            for inst_id, p in raw.items()
+        }
+
+    def daily_pnl(self) -> float:
+        return sum(float(p.get("upl", 0)) for p in self.get_positions().values())
 
     @_retry
     def _fetch_instruments(self):

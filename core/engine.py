@@ -1,7 +1,6 @@
 """
-交易引擎主循环
-每隔 BAR_SIZE 拉取最新 K 线 → 计算信号 → 风控审批 → 下单
-同时监控已有持仓的止损触发
+交易引擎主循环 v3 — 每周期拉取K线 → 策略评估 → 风控审批 → 下单。
+同时监控已有持仓的止损触发。
 """
 
 import time
@@ -9,19 +8,18 @@ import logging
 from datetime import datetime, time as dtime
 import pytz
 
-from core.broker import IBKRBroker
-from core.risk   import RiskManager
-from strategy.legacy.signals import compute_indicators, generate_signal
+from interfaces.ibkr import IBKRBroker
+from core.risk import RiskManager
+from strategies.fast_trading import MeanReversionStrategy
 from config.settings import (
     WATCHLIST, BAR_SIZE, MARKET_OPEN, MARKET_CLOSE,
-    STOP_LOSS_ATR_MULT, SIGNAL_COOLDOWN,
-    RSI_PERIOD, MOM_SLOW, ATR_PERIOD,
+    SIGNAL_COOLDOWN,
 )
 
-MIN_BARS = MOM_SLOW + ATR_PERIOD + 10  # need enough bars for slow EMA + ATR + buffer
+MIN_BARS = 60
 
 log = logging.getLogger(__name__)
-ET  = pytz.timezone("America/New_York")
+ET = pytz.timezone("America/New_York")
 
 
 def _market_time(t_str: str) -> dtime:
@@ -31,29 +29,31 @@ def _market_time(t_str: str) -> dtime:
 
 class TradingEngine:
     def __init__(self):
-        self.broker  = IBKRBroker()
-        self.risk    = RiskManager(self.broker)
-        self._stops  = {}         # {symbol: stop_price}
-        self._last_signal_time = {}   # 冷却计时
+        self.broker = IBKRBroker()
+        self.risk = RiskManager(self.broker)
+        self.strategy = MeanReversionStrategy()
+        self._stops: dict[str, float] = {}
+        self._last_signal_time: dict[str, float] = {}
 
-    # ── 生命周期 ─────────────────────────────────────────────────────────────
+    # ── 生命周期 ─────────────────────────────────────────────────────────
     def start(self):
         self.broker.connect()
         self.risk.reset_halt()
+        self.strategy.start()
         log.info("Engine started")
         try:
             self._main_loop()
         finally:
             self._close_all_eod()
+            self.strategy.stop()
             self.broker.disconnect()
             log.info("Engine stopped")
 
-    # ── 主循环 ───────────────────────────────────────────────────────────────
+    # ── 主循环 ───────────────────────────────────────────────────────────
     def _main_loop(self):
         bar_seconds = self._bar_to_seconds(BAR_SIZE)
         while True:
             now_et = datetime.now(ET).time()
-
             if not self._is_market_open(now_et):
                 log.info(f"Market closed ({now_et})  sleeping 60s")
                 time.sleep(60)
@@ -69,56 +69,53 @@ class TradingEngine:
             time.sleep(bar_seconds)
 
     def _process_symbol(self, symbol: str):
-        # 冷却期检查
         last = self._last_signal_time.get(symbol, 0)
         if time.time() - last < SIGNAL_COOLDOWN:
             return
 
-        df = self.broker.get_bars(symbol, duration="3 D", bar_size=BAR_SIZE)
-        if df is None or len(df) < MIN_BARS:
-            return
-
-        df   = compute_indicators(df)
-        sig  = generate_signal(df)
-
         positions = self.broker.positions()
-        holding   = positions.get(symbol, 0)
+        holding = positions.get(symbol, 0)
 
-        # ── 平仓逻辑 ─────────────────────────────────────────────────────────
-        if holding > 0 and sig["signal"] == -1:
-            log.info(f"[{symbol}] Close LONG  {sig['reason']}")
-            self.broker.market_order(symbol, holding, "SELL")
+        result = self.strategy.evaluate(
+            type("Feed", (), {
+                "fetch_history": lambda s, p="6mo", iv="1d":
+                    self.broker.get_bars(s, duration="3 D", bar_size=BAR_SIZE)
+            })(),
+            symbol,
+            positions={symbol: {"avg_cost": 0, "stop_loss": self._stops.get(symbol, 0)}}
+            if holding else None,
+        )
+
+        price = result.get("close", 0)
+        if price <= 0:
+            return
+
+        # ── 平仓 ─────────────────────────────────────────────────────────
+        if holding != 0 and result["signal"] in ("sell",):
+            action = "SELL" if holding > 0 else "BUY"
+            log.info(f"[{symbol}] Close  {result['reason']}")
+            self.broker.market_order(symbol, abs(holding), action)
             self._stops.pop(symbol, None)
             self._last_signal_time[symbol] = time.time()
             return
 
-        if holding < 0 and sig["signal"] == 1:
-            log.info(f"[{symbol}] Close SHORT  {sig['reason']}")
-            self.broker.market_order(symbol, abs(holding), "BUY")
-            self._stops.pop(symbol, None)
-            self._last_signal_time[symbol] = time.time()
-            return
-
-        # ── 开仓逻辑 ─────────────────────────────────────────────────────────
-        if holding == 0 and sig["signal"] != 0:
-            shares = self.risk.position_size(sig["price"], sig["atr"])
+        # ── 开仓 ─────────────────────────────────────────────────────────
+        if holding == 0 and result["signal"] == "buy":
+            atr_val = result.get("atr", price * 0.02)
+            shares = self.risk.position_size(price, atr_val)
             if shares <= 0:
                 return
-            if not self.risk.approve(symbol, shares, sig["price"]):
+            if not self.risk.approve(symbol, shares, price):
                 return
 
-            if sig["signal"] == 1:
-                self.broker.market_order(symbol, shares, "BUY")
-                self._stops[symbol] = sig["stop_long"]
-                log.info(f"[{symbol}] OPEN LONG  {shares}sh @ {sig['price']:.2f}  stop={sig['stop_long']:.2f}  {sig['reason']}")
-            else:
-                self.broker.market_order(symbol, shares, "SELL")
-                self._stops[symbol] = sig["stop_short"]
-                log.info(f"[{symbol}] OPEN SHORT {shares}sh @ {sig['price']:.2f}  stop={sig['stop_short']:.2f}  {sig['reason']}")
-
+            self.broker.market_order(symbol, shares, "BUY")
+            stop_mult = self.risk.get_atr_multiplier()
+            self._stops[symbol] = price - stop_mult * atr_val
+            log.info(f"[{symbol}] OPEN LONG  {shares}sh @ {price:.2f}  "
+                     f"stop={self._stops[symbol]:.2f}  {result['reason']}")
             self._last_signal_time[symbol] = time.time()
 
-    # ── 止损监控（每个周期检查）────────────────────────────────────────────────
+    # ── 止损监控 ─────────────────────────────────────────────────────────
     def _check_stops(self):
         positions = self.broker.positions()
         for symbol, stop_price in list(self._stops.items()):
@@ -135,16 +132,19 @@ class TradingEngine:
                 self.broker.market_order(symbol, abs(qty), action)
                 self._stops.pop(symbol, None)
 
-    # ── 收盘前全部平仓 ────────────────────────────────────────────────────────
+    # ── 收盘全平 ─────────────────────────────────────────────────────────
     def _close_all_eod(self):
         for symbol, qty in self.broker.positions().items():
             if qty == 0:
                 continue
             action = "SELL" if qty > 0 else "BUY"
             log.info(f"[EOD] Closing {symbol}  qty={qty}")
-            self.broker.market_order(symbol, abs(qty), action)
+            try:
+                self.broker.market_order(symbol, abs(qty), action)
+            except Exception as e:
+                log.error(f"[EOD] {symbol}: {e}")
 
-    # ── 工具 ─────────────────────────────────────────────────────────────────
+    # ── 工具 ─────────────────────────────────────────────────────────────
     @staticmethod
     def _is_market_open(t: dtime) -> bool:
         return _market_time(MARKET_OPEN) <= t <= _market_time(MARKET_CLOSE)

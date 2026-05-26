@@ -9,13 +9,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import logging
 from typing import Optional
 
+from core.broker_interface import BrokerInterface
 from core.data_feed import TencentFeed, DataFeed
 from core.risk import RiskManager
 
 log = logging.getLogger(__name__)
 
 
-class SimulationBroker:
+class SimulationBroker(BrokerInterface):
     """Simulated broker for paper trading — tracks virtual portfolio."""
 
     def __init__(self, initial_equity=100_000):
@@ -23,6 +24,13 @@ class SimulationBroker:
         self._positions: dict[str, dict] = {}
         self._pnl = 0.0
         self._feed = TencentFeed()
+        self._connected = False
+
+    def connect(self):
+        self._connected = True
+
+    def disconnect(self):
+        self._connected = False
 
     def net_liquidation(self) -> float:
         return self._equity
@@ -30,7 +38,15 @@ class SimulationBroker:
     def daily_pnl(self) -> float:
         return self._pnl
 
-    def positions(self) -> dict:
+    def positions(self) -> dict[str, float]:
+        """Unified interface: {symbol: quantity}."""
+        return {
+            sym: pos["shares"]
+            for sym, pos in self._positions.items()
+        }
+
+    def positions_detail(self) -> dict:
+        """Full position details: {symbol: {shares, avg_cost}}."""
         return self._positions
 
     def last_price(self, symbol: str) -> float:
@@ -91,8 +107,7 @@ class PaperTradingEngine:
                         if size > 0 and self.risk.approve(sym, size, price):
                             self.broker.market_order(sym, size, "BUY")
                     elif sig.get("signal") == "sell":
-                        pos = self.broker.positions().get(sym, {})
-                        qty = pos.get("shares", 0)
+                        qty = self.broker.positions().get(sym, 0)
                         if qty > 0:
                             self.broker.market_order(sym, qty, "SELL")
             except Exception as e:
