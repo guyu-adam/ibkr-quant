@@ -73,16 +73,17 @@ class GridScalpStrategy(BaseStrategy):
             self._build_grid(price, dynamic_spacing, trend_allowed)
 
         # Check grid fills
-        for level_price in sorted(self._orders.keys()):
-            order = self._orders[level_price]
+        for key in sorted(self._orders.keys()):
+            order = self._orders[key]
+            level_price = order["price"]
             if order["side"] == "BUY" and price <= level_price:
                 signals.append({"signal": "buy", "price": price, "size": order["size"],
                                "reason": f"grid_buy @ {level_price:.4f}"})
-                del self._orders[level_price]
+                del self._orders[key]
             elif order["side"] == "SELL" and price >= level_price:
                 signals.append({"signal": "sell", "price": price, "size": order["size"],
                                "reason": f"grid_sell @ {level_price:.4f}"})
-                del self._orders[level_price]
+                del self._orders[key]
 
         self._save_state()
         return signals
@@ -98,11 +99,11 @@ class GridScalpStrategy(BaseStrategy):
         for i in range(1, self.grid_levels + 1):
             offset = spacing * i
             if trend in ("both", "long"):
-                self._orders[round(mid * (1 - offset), 4)] = {
-                    "side": "BUY", "size": self.position_pct}
+                px = round(mid * (1 - offset), 6)
+                self._orders[str(px)] = {"price": px, "side": "BUY", "size": self.position_pct}
             if trend in ("both", "short"):
-                self._orders[round(mid * (1 + offset), 4)] = {
-                    "side": "SELL", "size": self.position_pct}
+                px = round(mid * (1 + offset), 6)
+                self._orders[str(px)] = {"price": px, "side": "SELL", "size": self.position_pct}
 
     def _calc_atr(self) -> float:
         if len(self._price_history) < 15:
@@ -126,7 +127,15 @@ class GridScalpStrategy(BaseStrategy):
                 with open(sf) as f:
                     state = json.load(f)
                 self._mid_price = state.get("mid_price", 0.0)
-                self._orders = {float(k): v for k, v in state.get("orders", {}).items()}
+                # Support both old format ({float: order}) and new format ({str: {price, side, size}})
+                raw_orders = state.get("orders", {})
+                self._orders = {}
+                for k, v in raw_orders.items():
+                    if isinstance(v, dict) and "price" in v:
+                        self._orders[str(v["price"])] = v
+                    else:
+                        px = float(k)
+                        self._orders[str(px)] = {"price": px, "side": v.get("side", ""), "size": v.get("size", 0.05)}
                 log.info(f"Loaded grid state: mid={self._mid_price}, {len(self._orders)} orders")
         except Exception:
             pass

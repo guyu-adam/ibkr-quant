@@ -298,6 +298,29 @@ class TimezoneArbitrageStrategy(BaseStrategy):
         return signals
 
 
+def make_ipo_hook(ipo_strategy=None, ipo_calendar=None):
+    """Create an EOD-compatible hook for HkIpoStrategy.
+
+    Usage:
+        from strategies.slow_trading import HkIpoStrategy, make_ipo_hook
+        ipo = HkIpoStrategy()
+        engine.add_eod_hook(make_ipo_hook(ipo, ipo_calendar))
+    """
+    strat = ipo_strategy or HkIpoStrategy()
+    calendar = ipo_calendar or []
+
+    def hook(broker, risk):
+        signals = strat.screen_and_trade(broker, calendar)
+        for sig in signals:
+            price = broker.last_price(sig["symbol"])
+            shares = sig.get("shares", 0)
+            action = "BUY" if sig["signal"] == "buy" else "SELL"
+            if shares > 0 and risk.approve(sig["symbol"], shares, price):
+                broker.market_order(sig["symbol"], shares, action)
+
+    return hook
+
+
 def make_tz_arb_hook(tz_strategy=None):
     """Create an EOD-compatible hook for TimezoneArbitrageStrategy.
 

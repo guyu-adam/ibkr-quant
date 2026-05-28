@@ -29,14 +29,14 @@ class TestGridScalpStrategy(unittest.TestCase):
 
     def test_grid_trend_long_only(self):
         self.gs._build_grid(100.0, 0.01, "long")
-        for price, order in self.gs._orders.items():
-            self.assertLess(price, 100.0)
+        for key, order in self.gs._orders.items():
+            self.assertLess(order["price"], 100.0)
             self.assertEqual(order["side"], "BUY")
 
     def test_grid_trend_short_only(self):
         self.gs._build_grid(100.0, 0.01, "short")
-        for price, order in self.gs._orders.items():
-            self.assertGreater(price, 100.0)
+        for key, order in self.gs._orders.items():
+            self.assertGreater(order["price"], 100.0)
             self.assertEqual(order["side"], "SELL")
 
     def test_state_persistence(self):
