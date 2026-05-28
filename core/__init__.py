@@ -1,4 +1,4 @@
-"""量化交易核心模块 — 数据源、风控、引擎、因子、优化器"""
+"""量化交易核心模块 — 数据源、风控、引擎、因子、优化器、ML、RL"""
 
 from core.strategy_base import BaseStrategy
 from core.risk import RiskManager
