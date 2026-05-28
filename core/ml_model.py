@@ -81,9 +81,8 @@ class AlphaModel:
         if self._model is None or self._feature_names is None:
             return pd.Series(0.0, index=X.index)
 
-        # 对齐特征
-        common_cols = [c for c in self._feature_names if c in X.columns]
-        X_aligned = X[common_cols].fillna(0.0)
+        # 按训练时的列顺序对齐，缺失列填 0
+        X_aligned = X.reindex(columns=self._feature_names, fill_value=0.0)
         preds = self._model.predict(X_aligned.values)
 
         return pd.Series(preds, index=X_aligned.index, name='alpha')

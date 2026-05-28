@@ -113,14 +113,20 @@ def hrp_weights(prices_df: pd.DataFrame, method="ward",
 
 
 def _in_cluster(link, target, node):
-    if node == target:
-        return True
-    if node < len(link) + 1:
-        return False
-    n = len(link) + 1
-    c1 = int(link[node - n, 0])
-    c2 = int(link[node - n, 1])
-    return _in_cluster(link, target, c1) or _in_cluster(link, target, c2)
+    """Iterative version — avoids recursion limit for large datasets."""
+    n_original = len(link) + 1
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if current == target:
+            return True
+        if current < n_original:
+            continue
+        c1 = int(link[current - n_original, 0])
+        c2 = int(link[current - n_original, 1])
+        stack.append(c1)
+        stack.append(c2)
+    return False
 
 
 def bootstrap_worst_case(returns: pd.DataFrame, n_samples=1000,
@@ -208,24 +214,26 @@ class LongTermPortfolio(BaseStrategy):
         return pd.DataFrame(rows)
 
     def rebalance(self, dry_run=False) -> list[dict]:
-        """Execute rebalancing using HRP weights."""
-        weights = compute_target_weights(self.cfg["positions"])
-        tickers = list(weights.keys())
+        """Execute rebalancing using allocate() as the sole weight source."""
+        tickers = list(self.cfg["positions"].keys())
         prices = get_current_prices(tickers)
-        equity = (self.broker.net_liquidation() or 100000) * self.cfg.get("max_equity_pct", 0.6)
+        equity = (self.broker.net_liquidation() or 100_000) * self.cfg.get("max_equity_pct", 0.6)
         current = self.broker.positions()
 
-        # Use HRP weights if available
+        # Use allocate() as the single source of truth for weights
         try:
             hist = yf.download(tickers, period="1y", progress=False, auto_adjust=True)
             if not hist.empty and len(hist) > 60:
                 close_df = hist["Close"]
                 if isinstance(close_df, pd.Series):
                     close_df = close_df.to_frame()
-                hrp_w = self.allocate(close_df)
-                weights = {t: hrp_w.get(t, weights[t]) for t in tickers}
+                weights = self.allocate(close_df)
+            else:
+                weights = self.allocate(
+                    pd.DataFrame({t: [prices.get(t, 0)] for t in tickers}).T
+                )
         except Exception:
-            pass
+            weights = compute_target_weights(self.cfg["positions"])
 
         trades = []
         drift_threshold = self.cfg.get("drift_threshold", 0.05)
@@ -268,8 +276,19 @@ class LongTermPortfolio(BaseStrategy):
 
     def dca_dips(self):
         dip_pct = self.cfg.get("dca_dip_pct", 0.10)
-        weights = compute_target_weights(self.cfg["positions"])
-        equity = self.broker.net_liquidation() or 100000
+        tickers = list(self.cfg["positions"].keys())
+        try:
+            hist = yf.download(tickers, period="1y", progress=False, auto_adjust=True)
+            if not hist.empty and len(hist) > 60:
+                close_df = hist["Close"]
+                if isinstance(close_df, pd.Series):
+                    close_df = close_df.to_frame()
+                weights = self.allocate(close_df)
+            else:
+                weights = compute_target_weights(self.cfg["positions"])
+        except Exception:
+            weights = compute_target_weights(self.cfg["positions"])
+        equity = self.broker.net_liquidation() or 100_000
         for ticker, weight in weights.items():
             try:
                 hist = yf.Ticker(ticker).history(period="52wk")

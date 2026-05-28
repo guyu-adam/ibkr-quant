@@ -133,7 +133,13 @@ class RiskManager:
 
     # ── Kelly Position Sizing ───────────────────────────────────────────────
     def record_trade(self, pnl: float, risked: float):
-        """Record trade outcome for Kelly estimation."""
+        """
+        Record trade outcome for Kelly estimation.
+
+        Args:
+            pnl: realized profit/loss in absolute dollar terms (e.g. +150.0 or -80.0)
+            risked: initial capital at risk in absolute dollar terms (e.g. stop_loss_distance * shares)
+        """
         self._trade_log.append({"win": pnl > 0, "pnl_pct": pnl / (risked + 1e-8)})
         if len(self._trade_log) > KELLY_ROLLING_TRADES * 2:
             self._trade_log = self._trade_log[-KELLY_ROLLING_TRADES * 2:]

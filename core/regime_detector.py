@@ -1,5 +1,8 @@
 """
-HMM 市场状态检测 — 识别趋势/震荡/高波动，动态切换策略参数。
+HMM 市场状态检测 v2 — 识别趋势/震荡/高波动，动态切换策略参数。
+
+v2 fixes:
+  - HMM 训练失败后自动重试（之前失败后永不重试导致 regime 检测永久失效）
 
 Usage:
     from core.regime_detector import RegimeDetector
@@ -24,6 +27,8 @@ class RegimeDetector:
         self._model = None
         self._last_regime = 0
         self._days_since_train = 0
+        self._failed_attempts = 0
+        self._max_retry_interval = HMM_RETRAIN_FREQ * 2
 
     def _build_features(self, df: pd.DataFrame) -> pd.DataFrame:
         close = df["close"].astype(float)
@@ -43,11 +48,28 @@ class RegimeDetector:
             return self._last_regime
 
         self._days_since_train += 1
+
+        # Use existing model if within retrain interval
+        should_retrain = False
         if self._model is not None and self._days_since_train < HMM_RETRAIN_FREQ:
             try:
                 self._last_regime = int(self._model.predict(features.iloc[-1:].values)[0])
             except Exception:
                 pass
+            return self._last_regime
+
+        # Force retry if model is None (previous training failed)
+        if self._model is None:
+            retry_interval = min(HMM_RETRAIN_FREQ * (1 + self._failed_attempts),
+                                self._max_retry_interval)
+            if self._days_since_train < retry_interval:
+                return self._last_regime
+            should_retrain = True
+
+        if self._model is not None and self._days_since_train >= HMM_RETRAIN_FREQ:
+            should_retrain = True
+
+        if not should_retrain:
             return self._last_regime
 
         try:
@@ -60,6 +82,7 @@ class RegimeDetector:
             model.fit(X)
             self._model = model
             self._days_since_train = 0
+            self._failed_attempts = 0
 
             states = model.predict(X)
 
@@ -70,21 +93,22 @@ class RegimeDetector:
                 if mask.sum() > 5:
                     state_returns[s] = features["ret_21d"].iloc[mask].mean()
 
-            # Sort: best return = state 0 (trend-up), worst = state N-1 (trend-down)
+            # Sort: best return = state 0, worst = state N-1
             sorted_states = sorted(state_returns, key=state_returns.get, reverse=True)
             state_map = {old: new for new, old in enumerate(sorted_states)}
             self._last_regime = state_map[states[-1]]
 
-            log.info(f"HMM trained: {len(X)} samples, states labeled by 21d return")
+            log.info(f"HMM trained: {len(X)} samples, current_regime={self._last_regime}")
         except ImportError:
+            self._failed_attempts += 1
             log.warning("hmmlearn not installed — regime detection disabled")
         except Exception as e:
-            log.warning(f"HMM training failed: {e}")
+            self._failed_attempts += 1
+            log.warning(f"HMM training failed (attempt {self._failed_attempts}): {e}")
 
         return self._last_regime
 
     def is_mean_reverting(self) -> bool:
-        """True if current regime is sideways (state 1)."""
         return self._last_regime == 1
 
     def is_trending_up(self) -> bool:

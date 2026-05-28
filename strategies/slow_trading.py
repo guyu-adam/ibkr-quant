@@ -296,3 +296,26 @@ class TimezoneArbitrageStrategy(BaseStrategy):
             }
 
         return signals
+
+
+def make_tz_arb_hook(tz_strategy=None):
+    """Create an EOD-compatible hook for TimezoneArbitrageStrategy.
+
+    Usage:
+        from strategies.slow_trading import TimezoneArbitrageStrategy, make_tz_arb_hook
+        tz = TimezoneArbitrageStrategy()
+        engine.add_eod_hook(make_tz_arb_hook(tz))
+    """
+    strat = tz_strategy or TimezoneArbitrageStrategy()
+
+    def hook(broker, risk):
+        signals = strat.screen_and_trade(broker)
+        for sig in signals:
+            if sig.get("signal") in ("buy", "sell"):
+                price = broker.last_price(sig["symbol"])
+                shares = sig.get("shares", 0)
+                action = "BUY" if sig["signal"] == "buy" else "SELL"
+                if shares > 0 and risk.approve(sig["symbol"], shares, price):
+                    broker.market_order(sig["symbol"], shares, action)
+
+    return hook
