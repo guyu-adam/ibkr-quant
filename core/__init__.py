@@ -3,6 +3,8 @@
 from core.strategy_base import BaseStrategy
 from core.risk import RiskManager
 from core.data_feed import DataFeed, YFinanceFeed, TencentFeed, CachedFeed
+from core.persistence import TradeJournal
+from core.alerts import AlertManager
 
 __all__ = ["BaseStrategy", "RiskManager", "DataFeed", "YFinanceFeed",
-           "TencentFeed", "CachedFeed"]
+           "TencentFeed", "CachedFeed", "TradeJournal", "AlertManager"]

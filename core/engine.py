@@ -1,8 +1,10 @@
 """
-交易引擎 v3 — 多策略循环 + EOD/小时 hooks + 风控 + 止损。
+交易引擎 v4 — 多策略并发 + EOD/小时 hooks + 风控 + 止损 + 信号融合。
 
 支持：
-  - 实时策略 (on_bar / evaluate)
+  - 多实时策略并发迭代 (evaluate)
+  - 信号融合引擎 (weighted/voting/equal)
+  - 策略间冲突协调
   - 事件驱动策略 (日终 generate_signals / screen_and_trade)
   - 自定义 hook 注册
 """
@@ -14,11 +16,12 @@ import pytz
 
 from interfaces.ibkr import IBKRBroker
 from core.risk import RiskManager
-from core.data_feed import VIXFeed
+from core.data_feed import VIXFeed, DataFeed
+from core.ensemble import EnsembleEngine
 from strategies.fast_trading import MeanReversionStrategy
 from config.settings import (
     WATCHLIST, BAR_SIZE, MARKET_OPEN, MARKET_CLOSE,
-    SIGNAL_COOLDOWN,
+    SIGNAL_COOLDOWN, ENSEMBLE_METHOD, ENSEMBLE_MIN_SIGNAL,
 )
 
 MIN_BARS = 60
@@ -33,18 +36,22 @@ def _market_time(t_str: str) -> dtime:
 
 
 class TradingEngine:
-    """Multi-strategy trading engine with EOD/hourly hooks."""
+    """Multi-strategy trading engine with EOD/hourly hooks and signal blending."""
 
-    def __init__(self):
+    def __init__(self, data_feed: DataFeed | None = None):
         self.broker = IBKRBroker()
         self.risk = RiskManager(self.broker)
         self._vix = VIXFeed()
+        self._feed = data_feed
         self._strategies: list = [MeanReversionStrategy()]
+        self._ensemble = EnsembleEngine(method=ENSEMBLE_METHOD)
         self._stops: dict[str, float] = {}
         self._last_signal_time: dict[str, float] = {}
-        self._hooks_eod: list = []     # callable(broker, risk)
-        self._hooks_hourly: list = []  # callable(broker, risk)
+        self._hooks_eod: list = []
+        self._hooks_hourly: list = []
         self._last_hourly_run = 0
+        # Track which strategy owns each position
+        self._position_owner: dict[str, str] = {}
 
     @property
     def strategy(self):
@@ -54,11 +61,9 @@ class TradingEngine:
         self._strategies.append(strategy)
 
     def add_eod_hook(self, hook):
-        """Register a callable for end-of-day processing (options/event-driven)."""
         self._hooks_eod.append(hook)
 
     def add_hourly_hook(self, hook):
-        """Register a callable for hourly processing."""
         self._hooks_hourly.append(hook)
 
     # ── 生命周期 ─────────────────────────────────────────────────────────
@@ -69,7 +74,8 @@ class TradingEngine:
             s.start()
         log.info(f"Engine started: {len(self._strategies)} strategies, "
                  f"{len(self._hooks_eod)} EOD hooks, "
-                 f"{len(self._hooks_hourly)} hourly hooks")
+                 f"{len(self._hooks_hourly)} hourly hooks, "
+                 f"ensemble={ENSEMBLE_METHOD}")
         try:
             self._main_loop()
         finally:
@@ -125,44 +131,78 @@ class TradingEngine:
         positions = self.broker.positions()
         holding = positions.get(symbol, 0)
 
-        # Use first strategy for real-time signals
-        strat = self._strategies[0]
-        result = strat.evaluate(
-            type("Feed", (), {
-                "fetch_history": lambda s, p="6mo", iv="1d":
-                    self.broker.get_bars(s, duration="3 D", bar_size=BAR_SIZE)
-            })(),
-            symbol,
-            positions={symbol: {"avg_cost": 0, "stop_loss": self._stops.get(symbol, 0)}}
-            if holding else None,
-        )
+        # Build a DataFeed from broker bars or external feed
+        feed = self._feed or type("Feed", (), {
+            "fetch_history": lambda s, p="6mo", iv="1d":
+                self.broker.get_bars(s, duration="3 D", bar_size=BAR_SIZE)
+        })()
 
-        price = result.get("close", 0)
+        # ── Iterate ALL strategies and collect signals ──
+        all_signals: list[tuple[str, float]] = []
+        strategy_results: dict[str, dict] = {}
+
+        for strat in self._strategies:
+            try:
+                pos_for_strat = (
+                    {symbol: {"avg_cost": 0, "stop_loss": self._stops.get(symbol, 0)}}
+                    if holding and self._position_owner.get(symbol) == strat.name
+                    else None
+                )
+                result = strat.evaluate(feed, symbol, positions=pos_for_strat)
+                strategy_results[strat.name] = result
+
+                signal = result.get("signal", "hold")
+                score = result.get("score", 0.0)
+                if signal == "buy":
+                    all_signals.append((strat.name, min(score / 100.0, 1.0)))
+                elif signal == "sell":
+                    all_signals.append((strat.name, -0.8))
+            except Exception as e:
+                log.debug(f"{strat.name}.evaluate({symbol}): {e}")
+
+        # ── Close existing position ──
+        if holding != 0:
+            owner = self._position_owner.get(symbol, "")
+            owner_result = strategy_results.get(owner, {})
+            if owner_result.get("signal") == "sell":
+                action = "SELL" if holding > 0 else "BUY"
+                log.info(f"[{symbol}] Close [{owner}] {owner_result['reason']}")
+                self.broker.market_order(symbol, abs(holding), action)
+                self._stops.pop(symbol, None)
+                self._position_owner.pop(symbol, None)
+                self._last_signal_time[symbol] = time.time()
+            return
+
+        # ── Blend signals for new entries ──
+        if not all_signals:
+            return
+
+        blended = self._ensemble.blend(all_signals)
+        if blended["signal"] != "buy" or blended["strength"] < ENSEMBLE_MIN_SIGNAL:
+            return
+
+        # Find the strongest strategy result for stop/ATR info
+        best_strat = max(all_signals, key=lambda x: x[1])[0] if all_signals else ""
+        best_result = strategy_results.get(best_strat, {})
+        price = best_result.get("close", 0)
         if price <= 0:
             return
 
-        if holding != 0 and result["signal"] in ("sell",):
-            action = "SELL" if holding > 0 else "BUY"
-            log.info(f"[{symbol}] Close  {result['reason']}")
-            self.broker.market_order(symbol, abs(holding), action)
-            self._stops.pop(symbol, None)
-            self._last_signal_time[symbol] = time.time()
+        atr_val = best_result.get("atr", price * 0.02)
+        shares = self.risk.position_size(price, atr_val)
+        if shares <= 0:
+            return
+        if not self.risk.approve(symbol, shares, price):
             return
 
-        if holding == 0 and result["signal"] == "buy":
-            atr_val = result.get("atr", price * 0.02)
-            shares = self.risk.position_size(price, atr_val)
-            if shares <= 0:
-                return
-            if not self.risk.approve(symbol, shares, price):
-                return
-
-            self.broker.market_order(symbol, shares, "BUY")
-            stop_mult = self.risk.get_atr_multiplier()
-            self._stops[symbol] = price - stop_mult * atr_val
-            log.info(f"[{symbol}] OPEN LONG  {shares}sh @ {price:.2f}  "
-                     f"stop={self._stops[symbol]:.2f}  {result['reason']}")
-            self._last_signal_time[symbol] = time.time()
+        self.broker.market_order(symbol, shares, "BUY")
+        stop_mult = self.risk.get_atr_multiplier()
+        self._stops[symbol] = price - stop_mult * atr_val
+        self._position_owner[symbol] = best_strat
+        log.info(f"[{symbol}] OPEN LONG [{best_strat}] {shares}sh @ {price:.2f}  "
+                 f"stop={self._stops[symbol]:.2f}  strength={blended['strength']:.3f}  "
+                 f"{best_result.get('reason', '')}")
+        self._last_signal_time[symbol] = time.time()
 
     def _check_stops(self):
         positions = self.broker.positions()
@@ -170,6 +210,7 @@ class TradingEngine:
             qty = positions.get(symbol, 0)
             if qty == 0:
                 self._stops.pop(symbol, None)
+                self._position_owner.pop(symbol, None)
                 continue
             price = self.broker.last_price(symbol)
             if price <= 0:
@@ -179,6 +220,7 @@ class TradingEngine:
                 log.warning(f"[{symbol}] STOP HIT  price={price:.2f}  stop={stop_price:.2f}")
                 self.broker.market_order(symbol, abs(qty), action)
                 self._stops.pop(symbol, None)
+                self._position_owner.pop(symbol, None)
 
     def _run_eod_hooks(self):
         for hook in self._hooks_eod:

@@ -1,5 +1,5 @@
 """
-quant — 多市场量化交易系统 v3
+quant — 多市场量化交易系统 v4
 
 Usage:
   python main.py --backtest       离线回测
@@ -10,6 +10,7 @@ Usage:
   python main.py --walkforward    参数 Walk-Forward 验证
   python main.py --alpha-scan     因子 IC/IR 分析
   python main.py --regime         市场状态检测
+  python main.py --tz-arb         ADR→港股时区套利扫描
 """
 
 import logging
@@ -23,6 +24,7 @@ from config.settings import (
 )
 
 os.makedirs("logs", exist_ok=True)
+os.makedirs("data", exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
@@ -32,15 +34,22 @@ log = logging.getLogger("main")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+def _get_journal():
+    from core.persistence import TradeJournal
+    return TradeJournal()
+
+
 def run_backtest():
     """离线回测 — 所有策略信号扫描."""
     from core.data_feed import YFinanceFeed
     from strategies.fast_trading import MeanReversionStrategy
     from core.regime_detector import RegimeDetector
+    from core.persistence import TradeJournal
 
     feed = YFinanceFeed()
     strategy = MeanReversionStrategy({'rsi_oversold': RSI_OVERSOLD, 'rsi_overbought': RSI_OVERBOUGHT})
     regime = RegimeDetector()
+    journal = TradeJournal()
 
     print("\n── Fast Trading Signal Scan ─────────────────")
     for sym in WATCHLIST:
@@ -48,6 +57,12 @@ def run_backtest():
         if df is not None:
             state = regime.fit_predict(df)
             result = strategy.evaluate(feed, sym)
+            journal.log_signal(
+                symbol=sym, strategy="mean_reversion",
+                signal=result['signal'], price=result.get('close', 0),
+                score=result.get('score', 0), regime=state,
+                reason=result.get('reason', ''),
+            )
             print(f"  {sym:<8} RSI={result['rsi']:>5.1f} score={result['score']:>4.0f} "
                   f"signal={result['signal']:<4} regime={state} {result.get('reason','')}")
     print()
@@ -95,7 +110,6 @@ def run_alpha_scan():
     """Alpha 因子 IC/IR 分析."""
     from core.data_feed import YFinanceFeed
     from core.alpha_factors import compute_factors, compute_forward_returns
-    from core.llm_alpha import LLMAlphaMiner
 
     feed = YFinanceFeed()
     print("\n── Alpha Factor IC Analysis ─────────────────")
@@ -168,10 +182,36 @@ def run_walkforward():
     print()
 
 
+def run_tz_arb():
+    """ADR→港股时区套利扫描."""
+    from strategies.slow_trading import TimezoneArbitrageStrategy
+    from core.persistence import TradeJournal
+
+    strategy = TimezoneArbitrageStrategy()
+    journal = TradeJournal()
+
+    print("\n── Timezone Arbitrage Scan ──────────────────")
+    adr_moves = strategy.get_adr_moves()
+    if not adr_moves:
+        print("  No ADR moves above threshold")
+    else:
+        for adr, info in adr_moves.items():
+            move = info["move"]
+            direction = "LONG" if move > 0 else "SHORT"
+            journal.log_signal(
+                symbol=adr, strategy="timezone_arb",
+                signal="buy" if move > 0 else "sell",
+                price=info["adr_close"], score=abs(move) * 100,
+                reason=f"ADR move {move:+.1%} → {info['hk_ticker']} {direction}",
+            )
+            print(f"  {adr:<6} → {info['hk_ticker']:<8}  {move:+.2%}  {direction}")
+    print()
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 def main():
     """CLI entry point — invoked via `quant` command after pip install."""
-    p = argparse.ArgumentParser(description="quant v3 — Multi-Market Quant System")
+    p = argparse.ArgumentParser(description="quant v4 — Multi-Market Quant System")
     p.add_argument("--backtest",    action="store_true", help="Signal scan")
     p.add_argument("--status",      action="store_true", help="Account status")
     p.add_argument("--rebalance",   action="store_true", help="Portfolio rebalance")
@@ -180,6 +220,7 @@ def main():
     p.add_argument("--alpha-scan",  action="store_true", help="Alpha factor IC analysis")
     p.add_argument("--regime",      action="store_true", help="Market regime detection")
     p.add_argument("--walkforward", action="store_true", help="Walk-forward validation")
+    p.add_argument("--tz-arb",      action="store_true", help="ADR→HK timezone arb scan")
     args = p.parse_args()
 
     if args.backtest:
@@ -196,6 +237,8 @@ def main():
         run_regime()
     elif args.walkforward:
         run_walkforward()
+    elif args.tz_arb:
+        run_tz_arb()
     elif args.scan:
         run_backtest()
     else:
